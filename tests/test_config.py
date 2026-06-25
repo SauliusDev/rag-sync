@@ -94,6 +94,30 @@ source_type = "video"
         (
             """
 [[profiles]]
+name = "non-string-source-path"
+source_paths = [1]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+            "non-string-source-path.*source_paths.*non-empty strings",
+        ),
+        (
+            """
+[[profiles]]
+name = "empty-string-source-path"
+source_paths = [""]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+            "empty-string-source-path.*source_paths.*non-empty strings",
+        ),
+        (
+            """
+[[profiles]]
 name = "empty-file-types"
 source_paths = ["/x/videos"]
 file_types = []
@@ -102,6 +126,30 @@ target_dataset = "quant-videos"
 source_type = "video"
 """,
             "file_types must be a non-empty list",
+        ),
+        (
+            """
+[[profiles]]
+name = "non-string-file-type"
+source_paths = ["/x/videos"]
+file_types = [1]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+            "non-string-file-type.*file_types.*non-empty strings",
+        ),
+        (
+            """
+[[profiles]]
+name = "empty-string-file-type"
+source_paths = ["/x/videos"]
+file_types = [""]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+            "empty-string-file-type.*file_types.*non-empty strings",
         ),
         (
             """

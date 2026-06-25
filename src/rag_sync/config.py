@@ -28,11 +28,15 @@ def _required_string(raw: dict[str, Any], key: str, profile_name: str) -> str:
     return value
 
 
-def _non_empty_list(raw: dict[str, Any], key: str, profile_name: str) -> list[Any]:
+def _non_empty_list(raw: dict[str, Any], key: str, profile_name: str) -> list[str]:
     value = raw.get(key)
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, (list, tuple)) or not value:
         raise ValueError(f"profile {profile_name}: {key} must be a non-empty list")
-    return value
+    if not all(isinstance(item, str) and item.strip() for item in value):
+        raise ValueError(
+            f"profile {profile_name}: {key} must contain only non-empty strings"
+        )
+    return list(value)
 
 
 def _enabled(raw: dict[str, Any], profile_name: str) -> bool:
