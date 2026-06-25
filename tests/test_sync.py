@@ -8,6 +8,7 @@ from rag_sync.db import RagSyncDb
 from rag_sync.models import ParserMode, Profile, SourceState
 from rag_sync.scanner import sha256_file
 from rag_sync.sync import (
+    DEFAULT_DATA_DIR,
     convert_source_file,
     output_path_for,
     parse_uploaded_document,
@@ -79,7 +80,9 @@ def test_output_path_for_uses_data_outputs_safe_name_and_does_not_mutate_source(
 
     output_path = output_path_for(_profile(source_file.parent), source_file, "passthrough")
 
-    assert output_path == Path("data/outputs/quant-articles/passthrough/A_Weird_Name.md")
+    assert output_path == (
+        DEFAULT_DATA_DIR / "outputs/quant-articles/passthrough/A_Weird_Name.md"
+    )
     assert source_file.read_text(encoding="utf-8") == before
 
 
@@ -101,7 +104,7 @@ def test_convert_source_file_passthrough_records_artifact_and_converted_state(
 
     artifact = db.latest_artifact_for_source(source_id)
     row = db.list_source_files()[0]
-    assert output_path == Path("data/outputs/quant-articles/passthrough/example.md")
+    assert output_path == DEFAULT_DATA_DIR / "outputs/quant-articles/passthrough/example.md"
     assert artifact is not None
     assert artifact["parser"] == "passthrough"
     assert artifact["quality_status"] == "clean"
@@ -282,3 +285,22 @@ def test_parse_uploaded_document_errors_when_upload_missing(project_tmp: Path):
 
     with pytest.raises(RuntimeError, match="No uploaded document found"):
         asyncio.run(parse_uploaded_document(db, source_id, FakeRagFlowClient()))
+
+
+def test_parse_uploaded_document_rejects_non_uploaded_status(project_tmp: Path):
+    db, source_id, _ = _converted_source_with_artifact(project_tmp)
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-id",
+        dataset_name="Dataset Name",
+        document_id="document-id",
+        document_name="Output.md",
+        upload_status="failed",
+        parse_status="not_started",
+    )
+    client = FakeRagFlowClient()
+
+    with pytest.raises(RuntimeError, match="No uploaded document found"):
+        asyncio.run(parse_uploaded_document(db, source_id, client))
+
+    assert client.parsed == []

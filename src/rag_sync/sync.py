@@ -36,7 +36,7 @@ def _safe_stem(source_path: Path) -> str:
 
 
 def output_path_for(profile: Profile, source_path: Path, parser_name: str) -> Path:
-    output_root = profile.output_dir or Path("data/outputs")
+    output_root = profile.output_dir or DEFAULT_DATA_DIR / "outputs"
     return output_root / profile.name / parser_name / f"{_safe_stem(source_path)}.md"
 
 
@@ -177,7 +177,7 @@ async def parse_uploaded_document(
             "SELECT * FROM ragflow_documents WHERE source_file_id = ?",
             (source_file_id,),
         ).fetchone()
-    if row is None:
+    if row is None or str(row["upload_status"]) != "uploaded":
         raise RuntimeError(f"No uploaded document found for source file {source_file_id}")
 
     client = client or RagFlowClient()
