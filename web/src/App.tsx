@@ -32,6 +32,7 @@ export function App() {
               key={item}
               className={item === active ? 'tab active' : 'tab'}
               type="button"
+              aria-current={item === active ? 'page' : undefined}
               onClick={() => setActive(item)}
             >
               {item}

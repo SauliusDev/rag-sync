@@ -27,7 +27,11 @@ export function ThemeButton() {
       aria-label={`Switch to ${nextTheme} theme`}
       onClick={() => setTheme(nextTheme)}
     >
-      {theme === 'dark' ? <Sun size={18} aria-hidden="true" /> : <Moon size={18} aria-hidden="true" />}
+      {theme === 'dark' ? (
+        <Sun size={18} aria-hidden="true" />
+      ) : (
+        <Moon size={18} aria-hidden="true" />
+      )}
     </button>
   );
 }
