@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
+from rag_sync.config import DEFAULT_PROFILE_PATH, DEFAULT_RAGFLOW_BASE_URL, load_profiles
 from rag_sync.db import RagSyncDb
-from rag_sync.models import Profile
-from rag_sync.sync import default_db, persist_scan
+from rag_sync.models import JobKind, Profile
+from rag_sync.ragflow_client import PROTECTED_DATASETS, QUANT_DATASET_DEFAULTS
+from rag_sync.sync import (
+    convert_source_file,
+    default_db,
+    parse_uploaded_document,
+    persist_scan,
+    upload_latest_artifact,
+)
+
+
+class ConvertRequest(BaseModel):
+    parser: str | None = None
+
+
+class EnqueueJobRequest(BaseModel):
+    kind: JobKind
+    source_file_id: int | None = None
+    profile_name: str | None = None
 
 
 def serialize_profile(profile: Profile) -> dict[str, object]:
@@ -58,6 +77,23 @@ def create_app(
         loaded = [serialize_profile(profile) for profile in load_configured_profiles()]
         return {"profiles": loaded}
 
+    @app.get("/api/settings")
+    def settings() -> dict[str, object]:
+        profiles_payload: list[dict[str, object]]
+        if profile_path.exists():
+            profiles_payload = [
+                serialize_profile(profile) for profile in load_configured_profiles()
+            ]
+        else:
+            profiles_payload = []
+        return {
+            "profile_path": str(profile_path),
+            "ragflow_base_url": DEFAULT_RAGFLOW_BASE_URL,
+            "protected_datasets": sorted(PROTECTED_DATASETS),
+            "dataset_defaults": QUANT_DATASET_DEFAULTS,
+            "profiles": profiles_payload,
+        }
+
     @app.post("/api/scan/{profile_name}")
     def scan(profile_name: str) -> dict[str, int]:
         profiles_by_name = {
@@ -75,6 +111,95 @@ def create_app(
     @app.get("/api/files")
     def files() -> dict[str, list[dict[str, object]]]:
         return {"files": db_factory().list_source_files()}
+
+    @app.get("/api/jobs")
+    def jobs() -> dict[str, object]:
+        return {"jobs": db_factory().list_jobs()}
+
+    @app.get("/api/status")
+    def status() -> dict[str, object]:
+        counts = db_factory().job_counts()
+        active = counts["running"]
+        queued = counts["queued"]
+        failed = counts["failed"]
+        if active or queued:
+            label = f"{active} active · {queued} queued"
+        elif failed:
+            label = f"{failed} failed"
+        else:
+            label = "Idle"
+        return {"queue": counts, "label": label}
+
+    @app.post("/api/jobs")
+    def enqueue_job(request: EnqueueJobRequest) -> dict[str, int]:
+        job_id = db_factory().create_job(
+            request.kind.value,
+            source_file_id=request.source_file_id,
+            profile_name=request.profile_name,
+        )
+        return {"job_id": job_id}
+
+    @app.post("/api/files/{source_file_id}/convert")
+    def convert_file(
+        source_file_id: int,
+        request: ConvertRequest | None = None,
+    ) -> dict[str, str]:
+        try:
+            output_path = convert_source_file(
+                db_factory(),
+                source_file_id,
+                request.parser if request else None,
+                profile_path,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"output_path": str(output_path)}
+
+    @app.post("/api/files/{source_file_id}/upload")
+    def upload_file(source_file_id: int) -> dict[str, object]:
+        try:
+            return dict(
+                asyncio.run(
+                    upload_latest_artifact(
+                        db_factory(),
+                        source_file_id,
+                        profile_path=profile_path,
+                    )
+                )
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/files/{source_file_id}/parse")
+    def parse_file(source_file_id: int) -> dict[str, object]:
+        try:
+            return dict(asyncio.run(parse_uploaded_document(db_factory(), source_file_id)))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/files/{source_file_id}/ragflow/stop")
+    def enqueue_stop_ragflow(source_file_id: int) -> dict[str, int]:
+        job_id = db_factory().create_job(
+            JobKind.STOP_RAGFLOW.value,
+            source_file_id=source_file_id,
+        )
+        return {"job_id": job_id}
+
+    @app.delete("/api/files/{source_file_id}/ragflow")
+    def enqueue_delete_ragflow(source_file_id: int) -> dict[str, int]:
+        job_id = db_factory().create_job(
+            JobKind.DELETE_RAGFLOW.value,
+            source_file_id=source_file_id,
+        )
+        return {"job_id": job_id}
+
+    @app.post("/api/files/{source_file_id}/ragflow/restart")
+    def enqueue_restart_ragflow(source_file_id: int) -> dict[str, int]:
+        job_id = db_factory().create_job(
+            JobKind.RESTART_RAGFLOW.value,
+            source_file_id=source_file_id,
+        )
+        return {"job_id": job_id}
 
     @app.get("/api/retrieval/query-sets/{name}")
     def retrieval_query_set(name: str) -> dict[str, object]:

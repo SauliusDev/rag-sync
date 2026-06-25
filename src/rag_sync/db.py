@@ -369,6 +369,31 @@ class RagSyncDb:
                     (status, progress, error_summary, job_id),
                 )
 
+    def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM jobs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def job_counts(self) -> dict[str, int]:
+        with self.session() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
+            ).fetchall()
+        counts = {"queued": 0, "running": 0, "failed": 0, "completed": 0}
+        for row in rows:
+            status = str(row["status"])
+            if status in counts:
+                counts[status] = int(row["count"])
+        return counts
+
     def add_artifact(
         self,
         source_file_id: int,
