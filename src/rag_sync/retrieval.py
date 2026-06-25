@@ -47,5 +47,5 @@ FORMULA_BENCHMARK_QUERIES: list[tuple[str, str]] = [
 
 def query_set(name: str) -> list[tuple[str, str]]:
     if name == "formula-benchmark":
-        return FORMULA_BENCHMARK_QUERIES
+        return list(FORMULA_BENCHMARK_QUERIES)
     raise KeyError(f"unknown query set: {name}")
