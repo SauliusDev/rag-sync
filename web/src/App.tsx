@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { fetchProfiles, type Profile } from './api';
 import { FileWorkbench } from './components/FileWorkbench';
+import { RetrievalPanel } from './components/RetrievalPanel';
 import { ThemeButton } from './theme';
 
 const tabs = ['Files', 'Profiles', 'Jobs', 'Datasets', 'Retrieval Tests', 'Settings'] as const;
@@ -57,6 +58,8 @@ export function App() {
               profilesError={profilesError}
               profilesLoading={profilesLoading}
             />
+          ) : active === 'Retrieval Tests' ? (
+            <RetrievalPanel />
           ) : active === 'Profiles' ? (
             <ProfilesPanel profiles={profiles} error={profilesError} />
           ) : (

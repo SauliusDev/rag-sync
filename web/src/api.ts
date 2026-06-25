@@ -18,6 +18,11 @@ export type SourceFile = {
   updated_at: string;
 };
 
+export type RetrievalQuery = {
+  id: string;
+  question: string;
+};
+
 export async function fetchProfiles(): Promise<Profile[]> {
   const response = await fetch('/api/profiles');
   if (!response.ok) {
@@ -45,4 +50,14 @@ export async function scanProfile(profileName: string): Promise<void> {
   if (!response.ok) {
     throw new Error(`Failed to scan ${profileName}: ${response.status}`);
   }
+}
+
+export async function fetchQuerySet(name: string): Promise<RetrievalQuery[]> {
+  const response = await fetch(`/api/retrieval/query-sets/${encodeURIComponent(name)}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch query set ${name}: ${response.status}`);
+  }
+
+  const data = (await response.json()) as { queries?: RetrievalQuery[] };
+  return data.queries ?? [];
 }

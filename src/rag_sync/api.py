@@ -76,6 +76,22 @@ def create_app(
     def files() -> dict[str, list[dict[str, object]]]:
         return {"files": db_factory().list_source_files()}
 
+    @app.get("/api/retrieval/query-sets/{name}")
+    def retrieval_query_set(name: str) -> dict[str, object]:
+        from rag_sync.retrieval import query_set
+
+        try:
+            queries = query_set(name)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"unknown query set: {name}") from exc
+        return {
+            "name": name,
+            "queries": [
+                {"id": query_id, "question": question}
+                for query_id, question in queries
+            ],
+        }
+
     return app
 
 

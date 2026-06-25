@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { fetchFiles, fetchProfiles, scanProfile } from './api';
+import { fetchFiles, fetchProfiles, fetchQuerySet, scanProfile } from './api';
 
 describe('fetchProfiles', () => {
   it('returns profile data from the API response', async () => {
@@ -94,5 +94,26 @@ describe('files API', () => {
     }
 
     expect(calls).toEqual([['/api/scan/quant%20articles', { method: 'POST' }]]);
+  });
+});
+
+describe('retrieval API', () => {
+  it('returns retrieval query sets from the API response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          queries: [{ id: 'Q1', question: 'What is d1?' }],
+        }),
+        { status: 200 },
+      );
+
+    try {
+      await expect(fetchQuerySet('formula-benchmark')).resolves.toEqual([
+        { id: 'Q1', question: 'What is d1?' },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

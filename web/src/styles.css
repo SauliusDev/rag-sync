@@ -287,6 +287,10 @@ h1 {
   font-size: 13px;
 }
 
+.panel-message {
+  margin: 16px;
+}
+
 .workbench-split {
   display: grid;
   min-height: 520px;
@@ -443,6 +447,35 @@ h1 {
   line-height: 1.45;
 }
 
+.retrieval-list {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.query-card {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.query-card h2 {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.query-card p {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 @media (max-width: 760px) {
   .topbar {
     flex-wrap: wrap;
@@ -481,5 +514,9 @@ h1 {
 
   .file-details {
     order: -1;
+  }
+
+  .query-card {
+    grid-template-columns: 1fr;
   }
 }

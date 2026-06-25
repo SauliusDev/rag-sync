@@ -140,3 +140,16 @@ source_type = "article"
     assert len(files) == 1
     assert files[0]["profile_name"] == "quant-articles"
     assert files[0]["source_path"].endswith("example.md")
+
+
+def test_retrieval_query_set_endpoint_returns_formula_benchmark():
+    client = TestClient(create_app())
+
+    response = client.get("/api/retrieval/query-sets/formula-benchmark")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "formula-benchmark"
+    assert len(data["queries"]) == 10
+    assert data["queries"][0]["id"] == "Q1"
+    assert "fractional differentiation" in data["queries"][0]["question"]
