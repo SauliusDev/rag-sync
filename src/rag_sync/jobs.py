@@ -21,9 +21,12 @@ class QueuedJob:
 
 class LocalJobQueue:
     def __init__(self, max_active_jobs: int = 2):
+        if max_active_jobs < 1:
+            raise ValueError("max_active_jobs must be >= 1")
         self.max_active_jobs = max_active_jobs
         self._jobs: list[QueuedJob] = []
         self._next_id = 1
+        self._runner_lock = asyncio.Lock()
 
     def enqueue(self, kind: JobKind, work: Callable[[], Awaitable[Any]]) -> QueuedJob:
         job = QueuedJob(id=self._next_id, kind=kind, work=work)
@@ -44,8 +47,9 @@ class LocalJobQueue:
             job.status = "failed"
 
     async def run_until_idle(self) -> None:
-        pending = [job for job in self._jobs if job.status == "queued"]
-        while pending:
-            batch = pending[: self.max_active_jobs]
-            await asyncio.gather(*(self._run_one(job) for job in batch))
+        async with self._runner_lock:
             pending = [job for job in self._jobs if job.status == "queued"]
+            while pending:
+                batch = pending[: self.max_active_jobs]
+                await asyncio.gather(*(self._run_one(job) for job in batch))
+                pending = [job for job in self._jobs if job.status == "queued"]
