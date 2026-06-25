@@ -140,6 +140,85 @@ def test_load_profiles_rejects_invalid_config(
         load_profiles(config_path)
 
 
+def test_load_profiles_rejects_missing_required_scalar_with_value_error(
+    tmp_path: Path,
+):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = "missing-parser"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+    )
+
+    with pytest.raises(ValueError, match="missing-parser.*parser_mode"):
+        load_profiles(config_path)
+
+
+def test_load_profiles_rejects_non_string_required_scalar(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = 1
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+    )
+
+    with pytest.raises(ValueError, match="profile #1.*name"):
+        load_profiles(config_path)
+
+
+def test_load_profiles_rejects_skip_rule_path_parts_string(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = "bad-skip-path-parts"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+
+[profiles.skip_rules]
+path_parts = "_meta"
+""",
+    )
+
+    with pytest.raises(ValueError, match="bad-skip-path-parts.*skip_rules.path_parts"):
+        load_profiles(config_path)
+
+
+def test_load_profiles_rejects_skip_rule_suffixes_non_string(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = "bad-skip-suffixes"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+
+[profiles.skip_rules]
+suffixes = [1]
+""",
+    )
+
+    with pytest.raises(ValueError, match="bad-skip-suffixes.*skip_rules.suffixes"):
+        load_profiles(config_path)
+
+
 def test_load_profiles_reports_invalid_parser_mode_with_profile_name(tmp_path: Path):
     config_path = write_config(
         tmp_path,
