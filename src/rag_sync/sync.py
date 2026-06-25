@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from rag_sync.config import DEFAULT_DATA_DIR, load_profiles
+from rag_sync.config import DEFAULT_DATA_DIR, DEFAULT_PROFILE_PATH, load_profiles
 from rag_sync.db import RagSyncDb
 from rag_sync.models import ParserMode, Profile, SourceState
 from rag_sync.parsers import MarkerParser, MinerUParser, PassthroughParser
@@ -21,8 +22,8 @@ def _source_row(db: RagSyncDb, source_file_id: int) -> dict[str, Any]:
     raise RuntimeError(f"Source file not found: {source_file_id}")
 
 
-def _profile_by_name(profile_name: str) -> Profile:
-    profiles = {profile.name: profile for profile in load_profiles()}
+def _profile_by_name(profile_name: str, profile_path: Path = DEFAULT_PROFILE_PATH) -> Profile:
+    profiles = {profile.name: profile for profile in load_profiles(profile_path)}
     profile = profiles.get(profile_name)
     if profile is None:
         raise RuntimeError(f"Profile not found for source file: {profile_name}")
@@ -37,7 +38,8 @@ def _safe_stem(source_path: Path) -> str:
 
 def output_path_for(profile: Profile, source_path: Path, parser_name: str) -> Path:
     output_root = profile.output_dir or DEFAULT_DATA_DIR / "outputs"
-    return output_root / profile.name / parser_name / f"{_safe_stem(source_path)}.md"
+    path_hash = sha256(str(source_path).encode("utf-8")).hexdigest()[:12]
+    return output_root / profile.name / parser_name / f"{_safe_stem(source_path)}-{path_hash}.md"
 
 
 def _parser_for_name(parser_name: str) -> MarkerParser | MinerUParser | PassthroughParser:
@@ -89,9 +91,10 @@ def convert_source_file(
     db: RagSyncDb,
     source_file_id: int,
     parser_name: str | None = None,
+    profile_path: Path = DEFAULT_PROFILE_PATH,
 ) -> Path:
     row = _source_row(db, source_file_id)
-    profile = _profile_by_name(str(row["profile_name"]))
+    profile = _profile_by_name(str(row["profile_name"]), profile_path)
     source_path = Path(str(row["source_path"]))
     chosen_parser = _chosen_parser_name(row, profile, parser_name)
     output_path = output_path_for(profile, source_path, chosen_parser)
@@ -114,6 +117,7 @@ def convert_source_file(
         warnings_json=json.dumps(quality.warnings),
     )
     if quality.status == "blocked":
+        db.update_source_state(source_file_id, SourceState.FAILED)
         raise RuntimeError(
             f"Conversion quality check blocked source file {source_file_id}: "
             f"{'; '.join(quality.warnings)}"
@@ -132,13 +136,16 @@ async def upload_latest_artifact(
     db: RagSyncDb,
     source_file_id: int,
     client: RagFlowClient | None = None,
+    profile_path: Path = DEFAULT_PROFILE_PATH,
 ) -> dict[str, object]:
     row = _source_row(db, source_file_id)
     artifact = db.latest_artifact_for_source(source_file_id)
     if artifact is None:
         raise RuntimeError(f"No artifact found for source file {source_file_id}")
+    if str(artifact["quality_status"]) == "blocked":
+        raise RuntimeError(f"Latest artifact is blocked for source file {source_file_id}")
 
-    profile = _profile_by_name(str(row["profile_name"]))
+    profile = _profile_by_name(str(row["profile_name"]), profile_path)
     client = client or RagFlowClient()
     dataset = await client.ensure_dataset(profile.target_dataset)
     dataset_id = _required_id(dataset, "id", "dataset_id", "dataset")
@@ -172,7 +179,7 @@ async def parse_uploaded_document(
     source_file_id: int,
     client: RagFlowClient | None = None,
 ) -> dict[str, object]:
-    with db.connect() as conn:
+    with db.session() as conn:
         row = conn.execute(
             "SELECT * FROM ragflow_documents WHERE source_file_id = ?",
             (source_file_id,),

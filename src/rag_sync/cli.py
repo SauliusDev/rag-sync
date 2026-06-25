@@ -72,14 +72,18 @@ def scan(profile_name: str | None = None, config: Path = DEFAULT_PROFILE_PATH) -
 
 
 @app.command()
-def convert(source_file_id: int, parser: str | None = None) -> None:
-    output_path = convert_source_file(default_db(), source_file_id, parser)
+def convert(
+    source_file_id: int,
+    parser: str | None = None,
+    config: Path = DEFAULT_PROFILE_PATH,
+) -> None:
+    output_path = convert_source_file(default_db(), source_file_id, parser, config)
     console.print(str(output_path))
 
 
 @app.command()
-def upload(source_file_id: int) -> None:
-    result = asyncio.run(upload_latest_artifact(default_db(), source_file_id))
+def upload(source_file_id: int, config: Path = DEFAULT_PROFILE_PATH) -> None:
+    result = asyncio.run(upload_latest_artifact(default_db(), source_file_id, profile_path=config))
     console.print(str(result["document_id"]))
 
 

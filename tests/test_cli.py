@@ -116,42 +116,46 @@ def test_profiles_errors_for_missing_config(tmp_path: Path) -> None:
 
 def test_convert_command_prints_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     db = object()
+    config = tmp_path / "profiles.toml"
     output_path = tmp_path / "output.md"
-    calls: list[tuple[object, int, str | None]] = []
+    calls: list[tuple[object, int, str | None, Path]] = []
     monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
     monkeypatch.setattr(
         "rag_sync.cli.convert_source_file",
-        lambda actual_db, source_file_id, parser: calls.append(
-            (actual_db, source_file_id, parser)
+        lambda actual_db, source_file_id, parser, profile_path: calls.append(
+            (actual_db, source_file_id, parser, profile_path)
         )
         or output_path,
     )
 
     result = CliRunner().invoke(
-        app, ["convert", "42", "--parser", "passthrough"]
+        app, ["convert", "42", "--parser", "passthrough", "--config", str(config)]
     )
 
     assert result.exit_code == 0
     assert str(output_path) in result.output
-    assert calls == [(db, 42, "passthrough")]
+    assert calls == [(db, 42, "passthrough", config)]
 
 
-def test_upload_command_prints_document_id(monkeypatch: pytest.MonkeyPatch):
+def test_upload_command_prints_document_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     db = object()
-    calls: list[tuple[object, int]] = []
+    config = tmp_path / "profiles.toml"
+    calls: list[tuple[object, int, Path]] = []
 
-    async def fake_upload(actual_db: object, source_file_id: int) -> dict[str, object]:
-        calls.append((actual_db, source_file_id))
+    async def fake_upload(
+        actual_db: object, source_file_id: int, profile_path: Path
+    ) -> dict[str, object]:
+        calls.append((actual_db, source_file_id, profile_path))
         return {"document_id": "document-123"}
 
     monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
     monkeypatch.setattr("rag_sync.cli.upload_latest_artifact", fake_upload)
 
-    result = CliRunner().invoke(app, ["upload", "42"])
+    result = CliRunner().invoke(app, ["upload", "42", "--config", str(config)])
 
     assert result.exit_code == 0
     assert "document-123" in result.output
-    assert calls == [(db, 42)]
+    assert calls == [(db, 42, config)]
 
 
 def test_parse_command_prints_parsed_message(monkeypatch: pytest.MonkeyPatch):

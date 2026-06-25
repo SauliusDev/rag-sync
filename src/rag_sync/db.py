@@ -219,6 +219,17 @@ class RagSyncDb:
                 raise RuntimeError("artifact insert did not return an id")
             return int(row["id"])
 
+    def update_source_state(self, source_file_id: int, state: SourceState) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                UPDATE source_files
+                SET state = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (state.value, source_file_id),
+            )
+
     def latest_artifact_for_source(self, source_file_id: int) -> dict[str, Any] | None:
         with self.session() as conn:
             row = conn.execute(

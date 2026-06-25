@@ -1,5 +1,6 @@
 import asyncio
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -70,7 +71,11 @@ def _add_source(db: RagSyncDb, source_file: Path, source_type: str = "article") 
     )
 
 
-def test_output_path_for_uses_data_outputs_safe_name_and_does_not_mutate_source(
+def _path_hash(source_path: Path) -> str:
+    return sha256(str(source_path).encode("utf-8")).hexdigest()[:12]
+
+
+def test_output_path_for_uses_data_outputs_safe_name_hash_and_does_not_mutate_source(
     project_tmp: Path,
 ):
     source_file = project_tmp / "Articles" / "A Weird: Name?.md"
@@ -81,9 +86,24 @@ def test_output_path_for_uses_data_outputs_safe_name_and_does_not_mutate_source(
     output_path = output_path_for(_profile(source_file.parent), source_file, "passthrough")
 
     assert output_path == (
-        DEFAULT_DATA_DIR / "outputs/quant-articles/passthrough/A_Weird_Name.md"
+        DEFAULT_DATA_DIR
+        / f"outputs/quant-articles/passthrough/A_Weird_Name-{_path_hash(source_file)}.md"
     )
     assert source_file.read_text(encoding="utf-8") == before
+
+
+def test_output_path_for_avoids_same_stem_collisions(project_tmp: Path):
+    first = project_tmp / "first" / "report.pdf"
+    second = project_tmp / "second" / "report.pdf"
+    first.parent.mkdir()
+    second.parent.mkdir()
+
+    first_output = output_path_for(_profile(first.parent), first, "marker")
+    second_output = output_path_for(_profile(second.parent), second, "marker")
+
+    assert first_output.name.startswith("report-")
+    assert second_output.name.startswith("report-")
+    assert first_output != second_output
 
 
 def test_convert_source_file_passthrough_records_artifact_and_converted_state(
@@ -98,13 +118,16 @@ def test_convert_source_file_passthrough_records_artifact_and_converted_state(
     db.migrate()
     source_id = _add_source(db, source_file)
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda: [_profile(source_dir)])
+    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [_profile(source_dir)])
 
     output_path = convert_source_file(db, source_id)
 
     artifact = db.latest_artifact_for_source(source_id)
     row = db.list_source_files()[0]
-    assert output_path == DEFAULT_DATA_DIR / "outputs/quant-articles/passthrough/example.md"
+    assert output_path == (
+        DEFAULT_DATA_DIR
+        / f"outputs/quant-articles/passthrough/example-{_path_hash(source_file)}.md"
+    )
     assert artifact is not None
     assert artifact["parser"] == "passthrough"
     assert artifact["quality_status"] == "clean"
@@ -126,7 +149,7 @@ def test_convert_source_file_records_blocked_artifact_then_raises(
     db.migrate()
     source_id = _add_source(db, source_file)
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda: [_profile(source_dir)])
+    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [_profile(source_dir)])
 
     with pytest.raises(RuntimeError, match="quality check blocked"):
         convert_source_file(db, source_id)
@@ -136,7 +159,7 @@ def test_convert_source_file_records_blocked_artifact_then_raises(
     assert artifact is not None
     assert artifact["quality_status"] == "blocked"
     assert json.loads(artifact["warnings_json"]) == ["generated markdown is empty"]
-    assert row["state"] == "converted"
+    assert row["state"] == "failed"
 
 
 class FakeRagFlowClient:
@@ -195,7 +218,7 @@ def test_upload_latest_artifact_records_ragflow_document(
 ):
     db, source_id, output_path = _converted_source_with_artifact(project_tmp)
     monkeypatch.setattr(
-        "rag_sync.sync.load_profiles", lambda: [_profile(project_tmp / "articles")]
+        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
     )
     client = FakeRagFlowClient()
 
@@ -213,6 +236,32 @@ def test_upload_latest_artifact_records_ragflow_document(
     assert doc["document_id"] == "document-id"
     assert doc["parse_status"] == "not_started"
     assert row["state"] == "uploaded"
+
+
+def test_upload_latest_artifact_rejects_blocked_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp: Path,
+):
+    db, source_id, _ = _converted_source_with_artifact(project_tmp)
+    blocked_output = project_tmp / "blocked.md"
+    blocked_output.write_text("", encoding="utf-8")
+    db.add_artifact(
+        source_file_id=source_id,
+        parser="passthrough",
+        output_path=str(blocked_output),
+        output_sha256=sha256_file(blocked_output),
+        quality_status="blocked",
+        warnings_json='["generated markdown is empty"]',
+    )
+    monkeypatch.setattr(
+        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
+    )
+    client = FakeRagFlowClient()
+
+    with pytest.raises(RuntimeError, match="Latest artifact is blocked"):
+        asyncio.run(upload_latest_artifact(db, source_id, client))
+
+    assert client.uploaded_paths == []
 
 
 def test_upload_latest_artifact_errors_when_artifact_missing(project_tmp: Path):
@@ -243,7 +292,7 @@ def test_upload_latest_artifact_validates_missing_ids(
 ):
     db, source_id, _ = _converted_source_with_artifact(project_tmp)
     monkeypatch.setattr(
-        "rag_sync.sync.load_profiles", lambda: [_profile(project_tmp / "articles")]
+        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
     )
 
     with pytest.raises(RuntimeError, match=message):
