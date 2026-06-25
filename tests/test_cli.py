@@ -68,3 +68,40 @@ def test_scan_lists_files_for_selected_profile(
     assert "quant-articles" in result.output
     assert "new" in result.output
     assert "example.md" in result.output
+
+
+def test_scan_errors_for_unknown_profile(tmp_path: Path) -> None:
+    source_path = tmp_path / "articles"
+    source_path.mkdir()
+    config = tmp_path / "profiles.toml"
+    _write_config(config, source_path)
+
+    result = CliRunner().invoke(
+        app,
+        ["scan", "--profile-name", "missing", "--config", str(config)],
+    )
+
+    assert result.exit_code == 1
+    assert "Unknown profile" in result.output
+    assert "missing" in result.output
+
+
+def test_profiles_errors_for_invalid_config(tmp_path: Path) -> None:
+    config = tmp_path / "profiles.toml"
+    config.write_text("profiles = []", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["profiles", "--config", str(config)])
+
+    assert result.exit_code == 1
+    assert "Failed to load profiles" in result.output
+    assert "profiles must be a non-empty list" in result.output
+
+
+def test_profiles_errors_for_missing_config(tmp_path: Path) -> None:
+    config = tmp_path / "missing.toml"
+
+    result = CliRunner().invoke(app, ["profiles", "--config", str(config)])
+
+    assert result.exit_code == 1
+    assert "Failed to load profiles" in result.output
+    assert "missing.toml" in result.output
