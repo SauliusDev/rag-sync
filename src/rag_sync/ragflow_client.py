@@ -19,7 +19,7 @@ def read_env_value(path: Path, key: str) -> str:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         k, value = stripped.split("=", 1)
-        if k == key:
+        if k.strip() == key:
             return value.strip().strip('"').strip("'")
     raise RuntimeError(f"{key} not found in {path}")
 
@@ -35,6 +35,7 @@ class RagFlowClient:
         api_key: str | None = None,
         env_file: Path = DEFAULT_RAGFLOW_ENV_FILE,
         key_var: str = DEFAULT_RAGFLOW_KEY_VAR,
+        transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.base_url = (
             base_url or os.environ.get("RAGFLOW_BASE_URL") or DEFAULT_RAGFLOW_BASE_URL
@@ -44,20 +45,28 @@ class RagFlowClient:
             or os.environ.get("RAGFLOW_API_KEY")
             or read_env_value(env_file, key_var)
         )
+        self._transport = transport
 
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
+    @staticmethod
+    def _data_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise RuntimeError("RAGFlow response missing data list")
+        return data
+
     async def list_datasets(self) -> list[dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, transport=self._transport) as client:
             resp = await client.get(
                 f"{self.base_url}/api/v1/datasets",
                 params={"page": 1, "page_size": 100},
                 headers=self.headers,
             )
             resp.raise_for_status()
-            return resp.json().get("data", [])
+            return self._data_list(resp.json())
 
     async def connection_status(self) -> dict[str, Any]:
         datasets = await self.list_datasets()
