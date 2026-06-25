@@ -10,8 +10,10 @@ export function App() {
   const [active, setActive] = useState<Tab>('Files');
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profilesError, setProfilesError] = useState('');
+  const [profilesLoading, setProfilesLoading] = useState(true);
 
   useEffect(() => {
+    setProfilesLoading(true);
     fetchProfiles()
       .then((nextProfiles) => {
         setProfiles(nextProfiles);
@@ -20,7 +22,8 @@ export function App() {
       .catch((error: unknown) => {
         setProfiles([]);
         setProfilesError(error instanceof Error ? error.message : 'Failed to fetch profiles');
-      });
+      })
+      .finally(() => setProfilesLoading(false));
   }, []);
 
   return (
@@ -49,7 +52,11 @@ export function App() {
             <h1 id="panel-title">{active}</h1>
           </div>
           {active === 'Files' ? (
-            <FileWorkbench profiles={profiles} />
+            <FileWorkbench
+              profiles={profiles}
+              profilesError={profilesError}
+              profilesLoading={profilesLoading}
+            />
           ) : active === 'Profiles' ? (
             <ProfilesPanel profiles={profiles} error={profilesError} />
           ) : (

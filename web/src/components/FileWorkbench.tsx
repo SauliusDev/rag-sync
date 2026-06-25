@@ -1,10 +1,7 @@
 import { RefreshCcw, Search } from 'lucide-react';
-import type { KeyboardEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { fetchFiles, scanProfile, type Profile, type SourceFile } from '../api';
-
-const defaultProfiles = ['quant-books-md', 'quant-papers', 'quant-articles', 'quant-videos'];
 
 function fileName(path: string) {
   return path.split('/').pop() || path;
@@ -16,9 +13,11 @@ function formatState(state: string) {
 
 type FileWorkbenchProps = {
   profiles: Profile[];
+  profilesError: string;
+  profilesLoading: boolean;
 };
 
-export function FileWorkbench({ profiles }: FileWorkbenchProps) {
+export function FileWorkbench({ profiles, profilesError, profilesLoading }: FileWorkbenchProps) {
   const [files, setFiles] = useState<SourceFile[]>([]);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<SourceFile | null>(null);
@@ -46,8 +45,19 @@ export function FileWorkbench({ profiles }: FileWorkbenchProps) {
   }
 
   async function scanDefaultProfiles() {
-    const profileNames =
-      profiles.length > 0 ? profiles.map((profile) => profile.name) : defaultProfiles;
+    if (profilesError) {
+      setError(profilesError);
+      return;
+    }
+    if (profilesLoading) {
+      setError('Profiles are still loading');
+      return;
+    }
+    if (profiles.length === 0) {
+      setError('No profiles configured');
+      return;
+    }
+    const profileNames = profiles.map((profile) => profile.name);
     setWorking(true);
     try {
       const failures: string[] = [];
@@ -95,12 +105,6 @@ export function FileWorkbench({ profiles }: FileWorkbenchProps) {
     setSelected(file);
   }
 
-  function selectFileFromKeyboard(event: KeyboardEvent<HTMLTableRowElement>, file: SourceFile) {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    selectFile(file);
-  }
-
   return (
     <div className="workbench">
       <div className="workbench-toolbar">
@@ -121,7 +125,7 @@ export function FileWorkbench({ profiles }: FileWorkbenchProps) {
           className="action-button primary"
           type="button"
           onClick={scanDefaultProfiles}
-          disabled={working}
+          disabled={working || profilesLoading || profiles.length === 0 || Boolean(profilesError)}
         >
           <RefreshCcw size={16} aria-hidden="true" />
           {working ? 'Scanning' : 'Scan profiles'}
@@ -159,15 +163,17 @@ export function FileWorkbench({ profiles }: FileWorkbenchProps) {
                   <tr
                     key={file.id}
                     className={selected?.id === file.id ? 'selected' : undefined}
-                    onClick={() => selectFile(file)}
-                    onKeyDown={(event) => selectFileFromKeyboard(event, file)}
-                    tabIndex={0}
-                    role="button"
                     aria-selected={selected?.id === file.id}
                   >
                     <td>
-                      <span className="file-name">{fileName(file.source_path)}</span>
-                      <span className="file-path">{file.source_path}</span>
+                      <button
+                        className="file-select-button"
+                        type="button"
+                        onClick={() => selectFile(file)}
+                      >
+                        <span className="file-name">{fileName(file.source_path)}</span>
+                        <span className="file-path">{file.source_path}</span>
+                      </button>
                     </td>
                     <td>{file.source_type}</td>
                     <td>{file.profile_name}</td>
