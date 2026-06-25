@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+
+def _frontmatter_value(value: object) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def make_upload_markdown(
@@ -13,10 +18,10 @@ def make_upload_markdown(
     body = source_path.read_text(encoding="utf-8", errors="replace")
     frontmatter = (
         "---\n"
-        f"source_path: {source_path}\n"
-        f"source_type: {source_type}\n"
-        f"parser: {parser}\n"
-        f"sha256: {sha256}\n"
+        f"source_path: {_frontmatter_value(source_path)}\n"
+        f"source_type: {_frontmatter_value(source_type)}\n"
+        f"parser: {_frontmatter_value(parser)}\n"
+        f"sha256: {_frontmatter_value(sha256)}\n"
         "---\n\n"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
