@@ -46,7 +46,9 @@ def parser_config(
             "prompt": RAPTOR_PROMPT,
         },
         "graphrag": {"use_graphrag": False},
-        "ext": {"toc_extraction": toc, "table_context_size": 0, "image_context_size": 0},
+        "toc_extraction": toc,
+        "table_context_size": 0,
+        "image_context_size": 0,
     }
 
 
@@ -118,6 +120,21 @@ class RagFlowClient:
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
+    def _raise_for_ragflow_error(self, payload: dict[str, Any]) -> None:
+        code = payload.get("code", 0)
+        if code in (0, "0", None):
+            return
+        message = str(payload.get("message") or payload.get("msg") or "RAGFlow API error")
+        raise RuntimeError(f"RAGFlow API error code={code}: {redact_secret(message, self.api_key)}")
+
+    def _response_json(self, resp: httpx.Response) -> dict[str, Any]:
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("RAGFlow response was not a JSON object")
+        self._raise_for_ragflow_error(payload)
+        return payload
+
     @staticmethod
     def _data_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
         data = payload.get("data")
@@ -132,8 +149,7 @@ class RagFlowClient:
                 params={"page": 1, "page_size": 100},
                 headers=self.headers,
             )
-            resp.raise_for_status()
-            return self._data_list(resp.json())
+            return self._data_list(self._response_json(resp))
 
     async def find_dataset(self, name: str) -> dict[str, Any] | None:
         datasets = await self.list_datasets()
@@ -156,8 +172,7 @@ class RagFlowClient:
                 json=payload,
                 headers={**self.headers, "Content-Type": "application/json"},
             )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._response_json(resp)
             return data.get("data") or data
 
     async def configure_dataset(self, dataset_id: str, name: str) -> None:
@@ -167,6 +182,7 @@ class RagFlowClient:
         payload = dict(QUANT_DATASET_DEFAULTS.get(name, {}))
         if not payload:
             return
+        await self._guard_protected_dataset_id(dataset_id)
         payload["pagerank"] = 0
         async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
             resp = await client.put(
@@ -174,7 +190,7 @@ class RagFlowClient:
                 json=payload,
                 headers={**self.headers, "Content-Type": "application/json"},
             )
-            resp.raise_for_status()
+            self._response_json(resp)
 
     async def upload_document(self, dataset_id: str, path: Path) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=120, transport=self._transport) as client:
@@ -184,8 +200,7 @@ class RagFlowClient:
                 files=files,
                 headers=self.headers,
             )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._response_json(resp)
             uploaded = data.get("data") or []
             return uploaded[0] if isinstance(uploaded, list) and uploaded else data
 
@@ -196,8 +211,15 @@ class RagFlowClient:
                 json={"document_ids": document_ids},
                 headers={**self.headers, "Content-Type": "application/json"},
             )
-            resp.raise_for_status()
-            return resp.json()
+            return self._response_json(resp)
+
+    async def _guard_protected_dataset_id(self, dataset_id: str) -> None:
+        datasets = await self.list_datasets()
+        for dataset in datasets:
+            if str(dataset.get("id")) == dataset_id and dataset.get("name") in PROTECTED_DATASETS:
+                raise RuntimeError(
+                    f"refusing to modify protected dataset: {dataset.get('name')}"
+                )
 
     async def connection_status(self) -> dict[str, Any]:
         datasets = await self.list_datasets()

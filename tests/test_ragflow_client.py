@@ -134,8 +134,8 @@ def test_ensure_dataset_configures_existing_dataset_without_posting():
     dataset = asyncio.run(client.ensure_dataset("quant-videos"))
 
     assert dataset == {"id": "existing-id", "name": "quant-videos"}
-    assert [request.method for request in seen_requests] == ["GET", "PUT"]
-    put_request = seen_requests[1]
+    assert [request.method for request in seen_requests] == ["GET", "GET", "PUT"]
+    put_request = seen_requests[2]
     assert put_request.url.path == "/api/v1/datasets/existing-id"
     assert put_request.headers["authorization"] == "Bearer secret-value"
     assert json_from_request(put_request) == {
@@ -209,7 +209,7 @@ def test_parse_documents_posts_document_ids_to_parse_endpoint():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_requests.append(request)
-        return httpx.Response(200, json={"code": 0, "data": True})
+        return httpx.Response(200, json={"code": 0, "data": {"success_count": 2}})
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
@@ -219,7 +219,7 @@ def test_parse_documents_posts_document_ids_to_parse_endpoint():
 
     response = asyncio.run(client.parse_documents("dataset-id", ["doc-1", "doc-2"]))
 
-    assert response == {"code": 0, "data": True}
+    assert response == {"code": 0, "data": {"success_count": 2}}
     assert len(seen_requests) == 1
     request = seen_requests[0]
     assert request.method == "POST"
@@ -245,6 +245,103 @@ def test_configure_dataset_refuses_protected_dataset():
 
     assert "refusing to modify protected dataset: quant-books-legacy" in str(exc_info.value)
     assert seen_requests == []
+
+
+def test_configure_dataset_refuses_protected_dataset_id():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "legacy-id", "name": "quant-books-legacy"}]},
+            )
+        return httpx.Response(500)
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(client.configure_dataset("legacy-id", "quant-videos"))
+
+    assert "refusing to modify protected dataset: quant-books-legacy" in str(exc_info.value)
+    assert [request.method for request in seen_requests] == ["GET"]
+
+
+def test_ensure_dataset_raises_on_ragflow_application_error_without_leaking_secret():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(
+            200,
+            json={"code": 102, "message": "create failed for secret-value"},
+        )
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(client.ensure_dataset("quant-papers"))
+
+    assert "code=102" in str(exc_info.value)
+    assert "secret-value" not in str(exc_info.value)
+
+
+def test_configure_dataset_raises_on_ragflow_application_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "dataset-id", "name": "quant-videos"}]},
+            )
+        return httpx.Response(200, json={"code": 102, "message": "configure failed"})
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RuntimeError, match="code=102"):
+        asyncio.run(client.configure_dataset("dataset-id", "quant-videos"))
+
+
+def test_upload_document_raises_on_ragflow_application_error(tmp_path: Path):
+    document = tmp_path / "sample.md"
+    document.write_text("# Title\n", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 102, "message": "upload failed"})
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RuntimeError, match="code=102"):
+        asyncio.run(client.upload_document("dataset-id", document))
+
+
+def test_parse_documents_raises_on_ragflow_application_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 102, "message": "parse failed"})
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RuntimeError, match="code=102"):
+        asyncio.run(client.parse_documents("dataset-id", ["doc-1"]))
 
 
 def json_from_request(request: httpx.Request) -> object:
