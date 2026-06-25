@@ -483,3 +483,25 @@ class RagSyncDb:
                 """,
                 (SourceState.UPLOADED.value, source_file_id),
             )
+
+    def clear_ragflow_document(self, source_file_id: int) -> None:
+        with self.session() as conn:
+            conn.execute(
+                "DELETE FROM ragflow_documents WHERE source_file_id = ?",
+                (source_file_id,),
+            )
+            conn.execute(
+                """
+                UPDATE source_files
+                SET state = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM artifacts WHERE source_file_id = source_files.id
+                    )
+                    THEN ?
+                    ELSE state
+                END,
+                updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (SourceState.CONVERTED.value, source_file_id),
+            )

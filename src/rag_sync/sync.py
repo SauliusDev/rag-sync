@@ -209,6 +209,49 @@ async def parse_uploaded_document(
     return response
 
 
+async def delete_ragflow_document(
+    db: RagSyncDb,
+    source_file_id: int,
+    client: RagFlowClient | None = None,
+) -> dict[str, object]:
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT * FROM ragflow_documents WHERE source_file_id = ?",
+            (source_file_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(f"No RAGFlow document found for source file {source_file_id}")
+
+    client = client or RagFlowClient()
+    dataset_id = str(row["dataset_id"])
+    document_id = str(row["document_id"])
+    await client.delete_documents(dataset_id, [document_id])
+    db.clear_ragflow_document(source_file_id)
+    return {"dataset_id": dataset_id, "document_id": document_id}
+
+
+async def restart_ragflow_document(
+    db: RagSyncDb,
+    source_file_id: int,
+    client: RagFlowClient | None = None,
+    profile_path: Path = DEFAULT_PROFILE_PATH,
+) -> dict[str, object]:
+    client = client or RagFlowClient()
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT * FROM ragflow_documents WHERE source_file_id = ?",
+            (source_file_id,),
+        ).fetchone()
+    if row is not None:
+        await client.stop_documents(str(row["dataset_id"]), [str(row["document_id"])])
+        await delete_ragflow_document(db, source_file_id, client)
+    uploaded = await upload_latest_artifact(
+        db, source_file_id, client=client, profile_path=profile_path
+    )
+    await parse_uploaded_document(db, source_file_id, client=client)
+    return uploaded
+
+
 def default_db(path: Path | None = None) -> RagSyncDb:
     db = RagSyncDb(path or DEFAULT_DATA_DIR / "rag-sync.sqlite")
     db.migrate()

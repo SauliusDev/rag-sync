@@ -11,9 +11,11 @@ from rag_sync.scanner import sha256_file
 from rag_sync.sync import (
     DEFAULT_DATA_DIR,
     convert_source_file,
+    delete_ragflow_document,
     output_path_for,
     parse_uploaded_document,
     persist_scan,
+    restart_ragflow_document,
     upload_latest_artifact,
 )
 
@@ -174,6 +176,8 @@ class FakeRagFlowClient:
         self.parse_response = parse_response or {"code": 0}
         self.uploaded_paths: list[Path] = []
         self.parsed: list[tuple[str, list[str]]] = []
+        self.stopped: tuple[str, list[str]] | None = None
+        self.deleted: tuple[str, list[str]] | None = None
 
     async def ensure_dataset(self, name: str) -> dict[str, object]:
         self.dataset_name = name
@@ -189,6 +193,18 @@ class FakeRagFlowClient:
     ) -> dict[str, object]:
         self.parsed.append((dataset_id, document_ids))
         return self.parse_response
+
+    async def stop_documents(
+        self, dataset_id: str, document_ids: list[str]
+    ) -> dict[str, object]:
+        self.stopped = (dataset_id, document_ids)
+        return {"code": 0}
+
+    async def delete_documents(
+        self, dataset_id: str, document_ids: list[str]
+    ) -> dict[str, object]:
+        self.deleted = (dataset_id, document_ids)
+        return {"code": 0}
 
 
 def _converted_source_with_artifact(project_tmp: Path) -> tuple[RagSyncDb, int, Path]:
@@ -353,3 +369,59 @@ def test_parse_uploaded_document_rejects_non_uploaded_status(project_tmp: Path):
         asyncio.run(parse_uploaded_document(db, source_id, client))
 
     assert client.parsed == []
+
+
+def test_delete_ragflow_document_deletes_remote_then_clears_local(project_tmp: Path):
+    db, source_id, _ = _converted_source_with_artifact(project_tmp)
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-id",
+        dataset_name="Dataset Name",
+        document_id="document-id",
+        document_name="Output.md",
+        upload_status="uploaded",
+        parse_status="parsed",
+    )
+    client = FakeRagFlowClient()
+
+    result = asyncio.run(delete_ragflow_document(db, source_id, client))
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM ragflow_documents WHERE source_file_id = ?", (source_id,)
+        ).fetchone()
+    assert result == {"dataset_id": "dataset-id", "document_id": "document-id"}
+    assert client.deleted == ("dataset-id", ["document-id"])
+    assert row is None
+
+
+def test_restart_ragflow_document_reuses_latest_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp: Path,
+):
+    db, source_id, output_path = _converted_source_with_artifact(project_tmp)
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-id",
+        dataset_name="Dataset Name",
+        document_id="old-doc",
+        document_name="Old.md",
+        upload_status="uploaded",
+        parse_status="parsed",
+    )
+    monkeypatch.setattr(
+        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
+    )
+    client = FakeRagFlowClient(uploaded={"id": "new-doc", "name": "Output.md"})
+
+    result = asyncio.run(restart_ragflow_document(db, source_id, client))
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM ragflow_documents WHERE source_file_id = ?", (source_id,)
+        ).fetchone()
+    assert client.deleted == ("dataset-id", ["old-doc"])
+    assert client.uploaded_paths == [output_path]
+    assert client.parsed == [("dataset-id", ["new-doc"])]
+    assert result["document_id"] == "new-doc"
+    assert row["document_id"] == "new-doc"
