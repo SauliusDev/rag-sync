@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import typer
@@ -8,7 +9,13 @@ from rich.table import Table
 
 from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
 from rag_sync.models import Profile
-from rag_sync.sync import default_db, persist_scan
+from rag_sync.sync import (
+    convert_source_file,
+    default_db,
+    parse_uploaded_document,
+    persist_scan,
+    upload_latest_artifact,
+)
 
 app = typer.Typer(help="RAG Sync CLI")
 console = Console()
@@ -62,6 +69,24 @@ def scan(profile_name: str | None = None, config: Path = DEFAULT_PROFILE_PATH) -
         ids = persist_scan(db, profile)
         table.add_row(profile.name, str(len(ids)))
     console.print(table)
+
+
+@app.command()
+def convert(source_file_id: int, parser: str | None = None) -> None:
+    output_path = convert_source_file(default_db(), source_file_id, parser)
+    console.print(str(output_path))
+
+
+@app.command()
+def upload(source_file_id: int) -> None:
+    result = asyncio.run(upload_latest_artifact(default_db(), source_file_id))
+    console.print(str(result["document_id"]))
+
+
+@app.command()
+def parse(source_file_id: int) -> None:
+    asyncio.run(parse_uploaded_document(default_db(), source_file_id))
+    console.print(f"Parsed document for source file {source_file_id}")
 
 
 if __name__ == "__main__":

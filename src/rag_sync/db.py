@@ -179,3 +179,107 @@ class RagSyncDb:
         with self.session() as conn:
             rows = conn.execute("SELECT * FROM source_files ORDER BY source_path").fetchall()
             return [dict(row) for row in rows]
+
+    def add_artifact(
+        self,
+        source_file_id: int,
+        parser: str,
+        output_path: str,
+        output_sha256: str,
+        quality_status: str,
+        warnings_json: str,
+    ) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO artifacts (
+                  source_file_id, parser, output_path, output_sha256,
+                  quality_status, warnings_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    source_file_id,
+                    parser,
+                    output_path,
+                    output_sha256,
+                    quality_status,
+                    warnings_json,
+                ),
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE source_files
+                SET state = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (SourceState.CONVERTED.value, source_file_id),
+            )
+            if row is None:
+                raise RuntimeError("artifact insert did not return an id")
+            return int(row["id"])
+
+    def latest_artifact_for_source(self, source_file_id: int) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM artifacts
+                WHERE source_file_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (source_file_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def upsert_ragflow_document(
+        self,
+        source_file_id: int,
+        dataset_id: str,
+        dataset_name: str,
+        document_id: str,
+        document_name: str,
+        upload_status: str,
+        parse_status: str,
+        chunk_count: int | None = None,
+        token_count: int | None = None,
+    ) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO ragflow_documents (
+                  source_file_id, dataset_id, dataset_name, document_id,
+                  document_name, upload_status, parse_status, chunk_count, token_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_file_id) DO UPDATE SET
+                  dataset_id = excluded.dataset_id,
+                  dataset_name = excluded.dataset_name,
+                  document_id = excluded.document_id,
+                  document_name = excluded.document_name,
+                  upload_status = excluded.upload_status,
+                  parse_status = excluded.parse_status,
+                  chunk_count = excluded.chunk_count,
+                  token_count = excluded.token_count,
+                  last_synced_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    source_file_id,
+                    dataset_id,
+                    dataset_name,
+                    document_id,
+                    document_name,
+                    upload_status,
+                    parse_status,
+                    chunk_count,
+                    token_count,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE source_files
+                SET state = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (SourceState.UPLOADED.value, source_file_id),
+            )

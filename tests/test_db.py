@@ -147,3 +147,88 @@ def test_mark_missing_absent_paths_commits_missing_state(project_tmp: Path):
     assert rows["/tmp/a.md"] == "new"
     assert rows["/tmp/b.md"] == "missing"
     assert rows["/tmp/c.md"] == "new"
+
+
+def test_add_artifact_marks_source_converted_and_latest_returns_newest(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    file_id = db.upsert_source_file(
+        "profile-a", "/tmp/a.md", "article", "md", "abc", 12, 1.0, SourceState.NEW
+    )
+
+    first_artifact_id = db.add_artifact(
+        source_file_id=file_id,
+        parser="passthrough",
+        output_path="/tmp/out-1.md",
+        output_sha256="sha-1",
+        quality_status="clean",
+        warnings_json="[]",
+    )
+    second_artifact_id = db.add_artifact(
+        source_file_id=file_id,
+        parser="passthrough",
+        output_path="/tmp/out-2.md",
+        output_sha256="sha-2",
+        quality_status="warning",
+        warnings_json='["warn"]',
+    )
+
+    latest = db.latest_artifact_for_source(file_id)
+    row = db.list_source_files()[0]
+
+    assert first_artifact_id != second_artifact_id
+    assert latest is not None
+    assert latest["id"] == second_artifact_id
+    assert latest["output_path"] == "/tmp/out-2.md"
+    assert latest["warnings_json"] == '["warn"]'
+    assert row["state"] == "converted"
+
+
+def test_latest_artifact_for_source_returns_none_when_missing(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+
+    assert db.latest_artifact_for_source(123) is None
+
+
+def test_upsert_ragflow_document_inserts_updates_single_row_and_marks_uploaded(
+    project_tmp: Path,
+):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    file_id = db.upsert_source_file(
+        "profile-a", "/tmp/a.md", "article", "md", "abc", 12, 1.0, SourceState.CONVERTED
+    )
+
+    db.upsert_ragflow_document(
+        source_file_id=file_id,
+        dataset_id="dataset-1",
+        dataset_name="Dataset One",
+        document_id="document-1",
+        document_name="First.md",
+        upload_status="uploaded",
+        parse_status="not_started",
+    )
+    db.upsert_ragflow_document(
+        source_file_id=file_id,
+        dataset_id="dataset-1",
+        dataset_name="Dataset One",
+        document_id="document-2",
+        document_name="Second.md",
+        upload_status="uploaded",
+        parse_status="not_started",
+        chunk_count=3,
+        token_count=30,
+    )
+
+    with db.connect() as conn:
+        docs = conn.execute("SELECT * FROM ragflow_documents").fetchall()
+    row = db.list_source_files()[0]
+
+    assert len(docs) == 1
+    assert docs[0]["source_file_id"] == file_id
+    assert docs[0]["document_id"] == "document-2"
+    assert docs[0]["document_name"] == "Second.md"
+    assert docs[0]["chunk_count"] == 3
+    assert docs[0]["token_count"] == 30
+    assert row["state"] == "uploaded"

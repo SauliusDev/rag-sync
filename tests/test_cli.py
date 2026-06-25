@@ -112,3 +112,61 @@ def test_profiles_errors_for_missing_config(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "Failed to load profiles" in result.output
     assert "missing.toml" in result.output
+
+
+def test_convert_command_prints_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    db = object()
+    output_path = tmp_path / "output.md"
+    calls: list[tuple[object, int, str | None]] = []
+    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
+    monkeypatch.setattr(
+        "rag_sync.cli.convert_source_file",
+        lambda actual_db, source_file_id, parser: calls.append(
+            (actual_db, source_file_id, parser)
+        )
+        or output_path,
+    )
+
+    result = CliRunner().invoke(
+        app, ["convert", "42", "--parser", "passthrough"]
+    )
+
+    assert result.exit_code == 0
+    assert str(output_path) in result.output
+    assert calls == [(db, 42, "passthrough")]
+
+
+def test_upload_command_prints_document_id(monkeypatch: pytest.MonkeyPatch):
+    db = object()
+    calls: list[tuple[object, int]] = []
+
+    async def fake_upload(actual_db: object, source_file_id: int) -> dict[str, object]:
+        calls.append((actual_db, source_file_id))
+        return {"document_id": "document-123"}
+
+    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
+    monkeypatch.setattr("rag_sync.cli.upload_latest_artifact", fake_upload)
+
+    result = CliRunner().invoke(app, ["upload", "42"])
+
+    assert result.exit_code == 0
+    assert "document-123" in result.output
+    assert calls == [(db, 42)]
+
+
+def test_parse_command_prints_parsed_message(monkeypatch: pytest.MonkeyPatch):
+    db = object()
+    calls: list[tuple[object, int]] = []
+
+    async def fake_parse(actual_db: object, source_file_id: int) -> dict[str, object]:
+        calls.append((actual_db, source_file_id))
+        return {"code": 0}
+
+    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
+    monkeypatch.setattr("rag_sync.cli.parse_uploaded_document", fake_parse)
+
+    result = CliRunner().invoke(app, ["parse", "42"])
+
+    assert result.exit_code == 0
+    assert "Parsed document for source file 42" in result.output
+    assert calls == [(db, 42)]
