@@ -32,7 +32,7 @@ def check_markdown_quality(path: Path, math_heavy: bool) -> QualityResult:
         warnings.append("replacement characters detected")
     if "<!-- formula-not-decoded -->" in text:
         warnings.append("formula placeholder detected")
-    if math_heavy and "$" not in text and "\\[" not in text:
+    if math_heavy and "$" not in body and "\\[" not in body:
         warnings.append("no obvious equations detected in math-heavy profile")
     status = "warning" if warnings else "clean"
     return QualityResult(status=status, warnings=warnings)

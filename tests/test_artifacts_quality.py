@@ -84,6 +84,24 @@ def test_quality_warns_when_math_heavy_without_equations(project_tmp: Path):
     assert any("no obvious equations" in warning for warning in result.warnings)
 
 
+def test_quality_math_heuristic_ignores_frontmatter(project_tmp: Path):
+    source = project_tmp / "price-$-source.md"
+    source.write_text("Body without math delimiters", encoding="utf-8")
+    out = project_tmp / "out.md"
+    make_upload_markdown(
+        source_path=source,
+        output_path=out,
+        source_type="paper",
+        parser="marker",
+        sha256="abc",
+    )
+
+    result = check_markdown_quality(out, math_heavy=True)
+
+    assert result.status == "warning"
+    assert any("no obvious equations" in warning for warning in result.warnings)
+
+
 def test_quality_clean_for_valid_markdown(project_tmp: Path):
     path = project_tmp / "clean.md"
     path.write_text("Body with $x + y$ equation", encoding="utf-8")
