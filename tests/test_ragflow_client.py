@@ -8,6 +8,7 @@ import pytest
 from rag_sync.ragflow_client import (
     QUANT_DATASET_DEFAULTS,
     RagFlowClient,
+    parser_config,
     read_env_value,
     redact_secret,
 )
@@ -42,6 +43,50 @@ def test_client_env_key_beats_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path
     client = RagFlowClient(base_url="http://ragflow.test", env_file=env)
 
     assert client.headers == {"Authorization": "Bearer env-secret"}
+
+
+def test_parser_config_places_ragflow_extension_fields_under_ext():
+    config = parser_config(3, 1, 1000, True)
+
+    assert "toc_extraction" not in config
+    assert "table_context_size" not in config
+    assert "image_context_size" not in config
+    assert config["ext"] == {
+        "toc_extraction": True,
+        "table_context_size": 0,
+        "image_context_size": 0,
+    }
+
+
+def test_quant_books_default_uses_renamed_dataset():
+    assert "quant-books" in QUANT_DATASET_DEFAULTS
+    assert "quant-books-md" not in QUANT_DATASET_DEFAULTS
+    assert QUANT_DATASET_DEFAULTS["quant-books"]["chunk_method"] == "naive"
+    assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["auto_keywords"] == 0
+    assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["auto_questions"] == 0
+    assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["chunk_token_num"] == 1000
+    assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["ext"][
+        "toc_extraction"
+    ] is True
+    assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["parent_child"][
+        "use_parent_child"
+    ] is True
+
+
+def test_quant_papers_default_uses_parent_child():
+    assert QUANT_DATASET_DEFAULTS["quant-papers"]["chunk_method"] == "naive"
+    assert QUANT_DATASET_DEFAULTS["quant-papers"]["parser_config"]["auto_keywords"] == 0
+    assert QUANT_DATASET_DEFAULTS["quant-papers"]["parser_config"]["auto_questions"] == 0
+    assert QUANT_DATASET_DEFAULTS["quant-papers"]["parser_config"]["parent_child"][
+        "use_parent_child"
+    ] is True
+
+
+def test_quant_articles_and_videos_disable_llm_enrichment():
+    for name in ("quant-articles", "quant-videos"):
+        parser = QUANT_DATASET_DEFAULTS[name]["parser_config"]
+        assert parser["auto_keywords"] == 0
+        assert parser["auto_questions"] == 0
 
 
 def test_list_datasets_sends_auth_and_query_params():
@@ -225,6 +270,76 @@ def test_parse_documents_posts_document_ids_to_parse_endpoint():
     assert request.method == "POST"
     assert request.url.path == "/api/v1/datasets/dataset-id/documents/parse"
     assert json_from_request(request) == {"document_ids": ["doc-1", "doc-2"]}
+
+
+def test_list_documents_sends_dataset_documents_get():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(200, json={"data": {"docs": [{"id": "doc-1", "progress": 0.8}]}})
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    documents = asyncio.run(client.list_documents("dataset-id"))
+
+    assert documents == [{"id": "doc-1", "progress": 0.8}]
+    request = seen_requests[0]
+    assert request.method == "GET"
+    assert request.url.path == "/api/v1/datasets/dataset-id/documents"
+
+
+def test_stop_documents_posts_document_ids_to_stop_endpoint():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(200, json={"code": 0, "data": True})
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = asyncio.run(client.stop_documents("dataset-id", ["doc-1"]))
+
+    assert response == {"code": 0, "data": True}
+    request = seen_requests[0]
+    assert request.method == "POST"
+    assert request.url.path == "/api/v1/datasets/dataset-id/documents/stop"
+    assert json_from_request(request) == {"document_ids": ["doc-1"]}
+
+
+def test_delete_documents_sends_delete_body():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "dataset-id", "name": "quant-videos"}]},
+            )
+        return httpx.Response(200, json={"code": 0, "data": True})
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = asyncio.run(client.delete_documents("dataset-id", ["doc-1"]))
+
+    assert response == {"code": 0, "data": True}
+    request = seen_requests[1]
+    assert request.method == "DELETE"
+    assert request.url.path == "/api/v1/datasets/dataset-id/documents"
+    assert json_from_request(request) == {"ids": ["doc-1"]}
 
 
 def test_configure_dataset_refuses_protected_dataset():

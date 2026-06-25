@@ -26,6 +26,7 @@ def parser_config(
     auto_questions: int,
     chunk_token_num: int,
     toc: bool,
+    parent_child: bool = False,
 ) -> dict[str, Any]:
     return {
         "auto_keywords": auto_keywords,
@@ -36,7 +37,10 @@ def parser_config(
         "layout_recognize": "DeepDOC",
         "topn_tags": 3,
         "filename_embd_weight": 0.1,
-        "parent_child": {"use_parent_child": False, "children_delimiter": "\n"},
+        "parent_child": {
+            "use_parent_child": parent_child,
+            "children_delimiter": "\n\n" if parent_child else "\n",
+        },
         "raptor": {
             "use_raptor": False,
             "max_cluster": 64,
@@ -46,36 +50,38 @@ def parser_config(
             "prompt": RAPTOR_PROMPT,
         },
         "graphrag": {"use_graphrag": False},
-        "toc_extraction": toc,
-        "table_context_size": 0,
-        "image_context_size": 0,
+        "ext": {
+            "toc_extraction": toc,
+            "table_context_size": 0,
+            "image_context_size": 0,
+        },
     }
 
 
 QUANT_DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
-    "quant-books-md": {
+    "quant-books": {
         "description": "Marker-converted quant books for formula-aware Markdown ingestion.",
         "permission": "me",
         "chunk_method": "naive",
-        "parser_config": parser_config(3, 1, 1000, True),
+        "parser_config": parser_config(0, 0, 1000, True, parent_child=True),
     },
     "quant-videos": {
         "description": "Markdown YouTube notes and transcripts.",
         "permission": "me",
         "chunk_method": "naive",
-        "parser_config": parser_config(3, 1, 800, False),
+        "parser_config": parser_config(0, 0, 800, False),
     },
     "quant-articles": {
         "description": "Clean Markdown quant articles and web references.",
         "permission": "me",
         "chunk_method": "naive",
-        "parser_config": parser_config(2, 0, 800, False),
+        "parser_config": parser_config(0, 0, 800, False),
     },
     "quant-papers": {
         "description": "Quant papers; prefer Markdown converted with Marker/Docling/MinerU.",
         "permission": "me",
-        "chunk_method": "paper",
-        "parser_config": parser_config(2, 1, 900, True),
+        "chunk_method": "naive",
+        "parser_config": parser_config(0, 0, 900, True, parent_child=True),
     },
 }
 
@@ -204,11 +210,46 @@ class RagFlowClient:
             uploaded = data.get("data") or []
             return uploaded[0] if isinstance(uploaded, list) and uploaded else data
 
+    async def list_documents(self, dataset_id: str) -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(timeout=30, transport=self._transport) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/v1/datasets/{dataset_id}/documents",
+                params={"page": 1, "page_size": 1000},
+                headers=self.headers,
+            )
+            payload = self._response_json(resp)
+            data = payload.get("data")
+            if isinstance(data, dict) and isinstance(data.get("docs"), list):
+                return data["docs"]
+            if isinstance(data, list):
+                return data
+            raise RuntimeError("RAGFlow response missing documents list")
+
     async def parse_documents(self, dataset_id: str, document_ids: list[str]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=120, transport=self._transport) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v1/datasets/{dataset_id}/documents/parse",
                 json={"document_ids": document_ids},
+                headers={**self.headers, "Content-Type": "application/json"},
+            )
+            return self._response_json(resp)
+
+    async def stop_documents(self, dataset_id: str, document_ids: list[str]) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/v1/datasets/{dataset_id}/documents/stop",
+                json={"document_ids": document_ids},
+                headers={**self.headers, "Content-Type": "application/json"},
+            )
+            return self._response_json(resp)
+
+    async def delete_documents(self, dataset_id: str, document_ids: list[str]) -> dict[str, Any]:
+        await self._guard_protected_dataset_id(dataset_id)
+        async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
+            resp = await client.request(
+                "DELETE",
+                f"{self.base_url}/api/v1/datasets/{dataset_id}/documents",
+                json={"ids": document_ids},
                 headers={**self.headers, "Content-Type": "application/json"},
             )
             return self._response_json(resp)
