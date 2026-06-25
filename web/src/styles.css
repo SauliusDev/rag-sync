@@ -200,6 +200,226 @@ h1 {
   line-height: 1.45;
 }
 
+.workbench {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.workbench-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.search-field {
+  display: flex;
+  min-width: 180px;
+  min-height: 36px;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  padding: 0 10px;
+  color: var(--muted);
+}
+
+.search-field input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.action-button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.action-button:hover:not(:disabled) {
+  background: var(--surface-subtle);
+}
+
+.action-button.primary {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.inline-error {
+  border: 1px solid #f97316;
+  border-radius: 6px;
+  background: rgb(249 115 22 / 10%);
+  color: #c2410c;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.workbench-split {
+  display: grid;
+  min-height: 520px;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  gap: 14px;
+}
+
+.table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.file-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.file-table th,
+.file-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.file-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.file-table tbody tr {
+  cursor: pointer;
+}
+
+.file-table tbody tr:hover,
+.file-table tbody tr.selected {
+  background: var(--surface-subtle);
+}
+
+.file-name,
+.file-path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-name {
+  font-weight: 600;
+}
+
+.file-path {
+  margin-top: 3px;
+  max-width: 520px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.empty-cell {
+  height: 180px;
+  color: var(--muted);
+  text-align: center !important;
+}
+
+.state-badge {
+  display: inline-flex;
+  max-width: 120px;
+  min-height: 24px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.state-converted,
+.state-uploaded,
+.state-parsed {
+  border-color: rgb(22 163 74 / 35%);
+  color: #16a34a;
+}
+
+.state-changed,
+.state-missing,
+.state-failed {
+  border-color: rgb(249 115 22 / 40%);
+  color: #f97316;
+}
+
+.file-details {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 14px;
+  min-width: 0;
+}
+
+.file-details h2 {
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.file-details p,
+.details-empty {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.file-details dl {
+  display: grid;
+  gap: 12px;
+}
+
+.file-details dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.file-details dd {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 @media (max-width: 760px) {
   .topbar {
     flex-wrap: wrap;
@@ -218,5 +438,25 @@ h1 {
 
   .panel {
     min-height: calc(100vh - 126px);
+  }
+
+  .workbench {
+    padding: 12px;
+  }
+
+  .workbench-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .search-field {
+    flex-basis: 100%;
+  }
+
+  .workbench-split {
+    grid-template-columns: 1fr;
+  }
+
+  .file-details {
+    order: -1;
   }
 }

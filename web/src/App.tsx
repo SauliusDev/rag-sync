@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { fetchProfiles, type Profile } from './api';
+import { FileWorkbench } from './components/FileWorkbench';
 import { ThemeButton } from './theme';
 
 const tabs = ['Files', 'Profiles', 'Jobs', 'Datasets', 'Retrieval Tests', 'Settings'] as const;
@@ -47,7 +48,9 @@ export function App() {
           <div className="panel-header">
             <h1 id="panel-title">{active}</h1>
           </div>
-          {active === 'Profiles' ? (
+          {active === 'Files' ? (
+            <FileWorkbench />
+          ) : active === 'Profiles' ? (
             <ProfilesPanel profiles={profiles} error={profilesError} />
           ) : (
             <p className="muted">Workbench content will be connected in the next task.</p>
