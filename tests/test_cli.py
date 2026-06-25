@@ -4,6 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from rag_sync.cli import app
+from rag_sync.db import RagSyncDb
 
 
 def test_cli_help_exits_successfully() -> None:
@@ -47,7 +48,7 @@ def test_profiles_lists_configured_profiles(
     assert "articles" in result.output
 
 
-def test_scan_lists_files_for_selected_profile(
+def test_scan_persists_files_for_selected_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     source_path = tmp_path / "articles"
@@ -57,6 +58,9 @@ def test_scan_lists_files_for_selected_profile(
     monkeypatch.chdir(tmp_path)
     config = tmp_path / "profiles.toml"
     _write_config(config, Path("articles"))
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
 
     result = CliRunner().invoke(
         app,
@@ -66,8 +70,11 @@ def test_scan_lists_files_for_selected_profile(
     assert result.exit_code == 0
     assert "Scan Results" in result.output
     assert "quant-articles" in result.output
-    assert "new" in result.output
-    assert "example.md" in result.output
+    assert "Stored Files" in result.output
+    assert "1" in result.output
+    rows = db.list_source_files()
+    assert len(rows) == 1
+    assert rows[0]["source_path"].endswith("example.md")
 
 
 def test_scan_errors_for_unknown_profile(tmp_path: Path) -> None:

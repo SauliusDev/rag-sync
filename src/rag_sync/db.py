@@ -150,6 +150,31 @@ class RagSyncDb:
                 raise RuntimeError("source file upsert did not return an id")
             return int(row["id"])
 
+    def existing_hashes(self, profile_name: str) -> dict[str, str]:
+        with self.session() as conn:
+            rows = conn.execute(
+                "SELECT source_path, sha256 FROM source_files WHERE profile_name = ?",
+                (profile_name,),
+            ).fetchall()
+            return {str(row["source_path"]): str(row["sha256"]) for row in rows}
+
+    def mark_missing_absent_paths(self, profile_name: str, seen_paths: set[str]) -> None:
+        with self.session() as conn:
+            rows = conn.execute(
+                "SELECT id, source_path FROM source_files WHERE profile_name = ?",
+                (profile_name,),
+            ).fetchall()
+            for row in rows:
+                if row["source_path"] not in seen_paths:
+                    conn.execute(
+                        """
+                        UPDATE source_files
+                        SET state = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (SourceState.MISSING.value, row["id"]),
+                    )
+
     def list_source_files(self) -> list[dict[str, Any]]:
         with self.session() as conn:
             rows = conn.execute("SELECT * FROM source_files ORDER BY source_path").fetchall()

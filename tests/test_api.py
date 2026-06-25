@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from rag_sync.api import create_app
+from rag_sync.db import RagSyncDb
 
 
 def test_health_endpoint():
@@ -82,3 +83,60 @@ def test_profiles_endpoint_returns_stable_error_for_bad_config(tmp_path: Path):
 
     assert response.status_code == 500
     assert response.json()["detail"].startswith("failed to load profiles:")
+
+
+def test_scan_endpoint_returns_404_for_unknown_profile(tmp_path: Path):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        """
+[[profiles]]
+name = "quant-articles"
+source_paths = ["/atlas/articles"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-articles"
+source_type = "article"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
+
+    response = client.post("/api/scan/missing")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "unknown profile: missing"}
+
+
+def test_scan_and_files_endpoints_use_injected_db(tmp_path: Path):
+    source_dir = tmp_path / "articles"
+    source_dir.mkdir()
+    (source_dir / "example.md").write_text("# Example\n", encoding="utf-8")
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-articles"
+source_paths = ["{source_dir}"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-articles"
+source_type = "article"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
+
+    scan_response = client.post("/api/scan/quant-articles")
+    files_response = client.get("/api/files")
+
+    assert scan_response.status_code == 200
+    assert scan_response.json() == {"count": 1}
+    assert files_response.status_code == 200
+    files = files_response.json()["files"]
+    assert len(files) == 1
+    assert files[0]["profile_name"] == "quant-articles"
+    assert files[0]["source_path"].endswith("example.md")

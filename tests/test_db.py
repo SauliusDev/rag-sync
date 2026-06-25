@@ -111,3 +111,39 @@ def test_upsert_preserves_curation_fields_on_rescan(project_tmp: Path):
     assert row["priority"] == 10
     assert row["tags"] == "quant,review"
     assert row["note"] == "keep"
+
+
+def test_existing_hashes_returns_paths_for_profile_only(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    db.upsert_source_file(
+        "profile-a", "/tmp/a.md", "article", "md", "abc", 12, 1.0, SourceState.NEW
+    )
+    db.upsert_source_file(
+        "profile-b", "/tmp/b.md", "article", "md", "def", 13, 2.0, SourceState.NEW
+    )
+
+    hashes = db.existing_hashes("profile-a")
+
+    assert hashes == {"/tmp/a.md": "abc"}
+
+
+def test_mark_missing_absent_paths_commits_missing_state(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    db.upsert_source_file(
+        "profile-a", "/tmp/a.md", "article", "md", "abc", 12, 1.0, SourceState.NEW
+    )
+    db.upsert_source_file(
+        "profile-a", "/tmp/b.md", "article", "md", "def", 13, 2.0, SourceState.NEW
+    )
+    db.upsert_source_file(
+        "profile-b", "/tmp/c.md", "article", "md", "ghi", 14, 3.0, SourceState.NEW
+    )
+
+    db.mark_missing_absent_paths("profile-a", {"/tmp/a.md"})
+
+    rows = {row["source_path"]: row["state"] for row in db.list_source_files()}
+    assert rows["/tmp/a.md"] == "new"
+    assert rows["/tmp/b.md"] == "missing"
+    assert rows["/tmp/c.md"] == "new"

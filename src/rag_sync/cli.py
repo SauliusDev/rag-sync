@@ -8,7 +8,7 @@ from rich.table import Table
 
 from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
 from rag_sync.models import Profile
-from rag_sync.scanner import scan_profile
+from rag_sync.sync import default_db, persist_scan
 
 app = typer.Typer(help="RAG Sync CLI")
 console = Console()
@@ -44,8 +44,7 @@ def profiles(config: Path = DEFAULT_PROFILE_PATH) -> None:
 def scan(profile_name: str | None = None, config: Path = DEFAULT_PROFILE_PATH) -> None:
     table = Table(title="Scan Results")
     table.add_column("Profile")
-    table.add_column("State")
-    table.add_column("Path")
+    table.add_column("Stored Files", justify="right")
     profiles_by_name = {
         profile.name: profile for profile in _load_profiles_or_exit(config)
     }
@@ -58,9 +57,10 @@ def scan(profile_name: str | None = None, config: Path = DEFAULT_PROFILE_PATH) -
             raise typer.Exit(1)
         profiles_to_scan = [profile]
 
+    db = default_db()
     for profile in profiles_to_scan:
-        for result in scan_profile(profile, existing_hashes={}):
-            table.add_row(profile.name, result.state, str(result.source_path))
+        ids = persist_scan(db, profile)
+        table.add_row(profile.name, str(len(ids)))
     console.print(table)
 
 

@@ -6,7 +6,9 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 
 from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
+from rag_sync.db import RagSyncDb
 from rag_sync.models import Profile
+from rag_sync.sync import default_db, persist_scan
 
 
 def serialize_profile(profile: Profile) -> dict[str, object]:
@@ -32,8 +34,18 @@ def serialize_profile(profile: Profile) -> dict[str, object]:
 def create_app(
     profile_path: Path = DEFAULT_PROFILE_PATH,
     profile_loader: Callable[[Path], list[Profile]] = load_profiles,
+    db_factory: Callable[[], RagSyncDb] = default_db,
 ) -> FastAPI:
     app = FastAPI(title="RAG Sync", version="0.1.0")
+
+    def load_configured_profiles() -> list[Profile]:
+        try:
+            return profile_loader(profile_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to load profiles: {exc}",
+            ) from exc
 
     @app.get("/api/health")
     def health() -> dict[str, bool]:
@@ -43,14 +55,26 @@ def create_app(
     def profiles() -> dict[str, list[dict[str, object]]]:
         if not profile_path.exists():
             return {"profiles": []}
-        try:
-            loaded = [serialize_profile(profile) for profile in profile_loader(profile_path)]
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"failed to load profiles: {exc}",
-            ) from exc
+        loaded = [serialize_profile(profile) for profile in load_configured_profiles()]
         return {"profiles": loaded}
+
+    @app.post("/api/scan/{profile_name}")
+    def scan(profile_name: str) -> dict[str, int]:
+        profiles_by_name = {
+            profile.name: profile for profile in load_configured_profiles()
+        }
+        profile = profiles_by_name.get(profile_name)
+        if profile is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown profile: {profile_name}",
+            )
+        ids = persist_scan(db_factory(), profile)
+        return {"count": len(ids)}
+
+    @app.get("/api/files")
+    def files() -> dict[str, list[dict[str, object]]]:
+        return {"files": db_factory().list_source_files()}
 
     return app
 
