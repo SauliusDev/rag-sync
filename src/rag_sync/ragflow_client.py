@@ -12,6 +12,73 @@ from rag_sync.config import (
     DEFAULT_RAGFLOW_KEY_VAR,
 )
 
+PROTECTED_DATASETS = {"quant-books-legacy"}
+
+RAPTOR_PROMPT = (
+    "Please summarize the following paragraphs. Be careful with the numbers, "
+    "do not make things up. Paragraphs as following:\n      {cluster_content}\n"
+    "The above is the content you need to summarize."
+)
+
+
+def parser_config(
+    auto_keywords: int,
+    auto_questions: int,
+    chunk_token_num: int,
+    toc: bool,
+) -> dict[str, Any]:
+    return {
+        "auto_keywords": auto_keywords,
+        "auto_questions": auto_questions,
+        "chunk_token_num": chunk_token_num,
+        "delimiter": "\n",
+        "html4excel": False,
+        "layout_recognize": "DeepDOC",
+        "topn_tags": 3,
+        "filename_embd_weight": 0.1,
+        "parent_child": {"use_parent_child": False, "children_delimiter": "\n"},
+        "raptor": {
+            "use_raptor": False,
+            "max_cluster": 64,
+            "max_token": 256,
+            "threshold": 0.1,
+            "random_seed": 0,
+            "prompt": RAPTOR_PROMPT,
+        },
+        "graphrag": {"use_graphrag": False},
+        "ext": {"toc_extraction": toc, "table_context_size": 0, "image_context_size": 0},
+    }
+
+
+QUANT_DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
+    "quant-books-md": {
+        "description": "Marker-converted quant books for formula-aware Markdown ingestion.",
+        "permission": "me",
+        "chunk_method": "naive",
+        "parser_config": parser_config(3, 1, 1000, True),
+    },
+    "quant-videos": {
+        "description": "Markdown YouTube notes and transcripts.",
+        "permission": "me",
+        "chunk_method": "naive",
+        "parser_config": parser_config(3, 1, 800, False),
+    },
+    "quant-articles": {
+        "description": "Clean Markdown quant articles and web references.",
+        "permission": "me",
+        "chunk_method": "naive",
+        "parser_config": parser_config(2, 0, 800, False),
+    },
+    "quant-papers": {
+        "description": "Quant papers; prefer Markdown converted with Marker/Docling/MinerU.",
+        "permission": "me",
+        "chunk_method": "paper",
+        "parser_config": parser_config(2, 1, 900, True),
+    },
+}
+
+DEFAULT_EMBEDDING_MODEL = "qwen/qwen3-embedding-8b@openrouter-embed@OpenAI-API-Compatible"
+
 
 def read_env_value(path: Path, key: str) -> str:
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -67,6 +134,70 @@ class RagFlowClient:
             )
             resp.raise_for_status()
             return self._data_list(resp.json())
+
+    async def find_dataset(self, name: str) -> dict[str, Any] | None:
+        datasets = await self.list_datasets()
+        return next((dataset for dataset in datasets if dataset.get("name") == name), None)
+
+    async def ensure_dataset(self, name: str) -> dict[str, Any]:
+        if name in PROTECTED_DATASETS:
+            raise RuntimeError(f"refusing to modify protected dataset: {name}")
+
+        existing = await self.find_dataset(name)
+        if existing:
+            await self.configure_dataset(str(existing["id"]), name)
+            return existing
+
+        payload = {"name": name, **QUANT_DATASET_DEFAULTS.get(name, {"chunk_method": "naive"})}
+        payload.setdefault("embedding_model", DEFAULT_EMBEDDING_MODEL)
+        async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/v1/datasets",
+                json=payload,
+                headers={**self.headers, "Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("data") or data
+
+    async def configure_dataset(self, dataset_id: str, name: str) -> None:
+        if name in PROTECTED_DATASETS:
+            raise RuntimeError(f"refusing to modify protected dataset: {name}")
+
+        payload = dict(QUANT_DATASET_DEFAULTS.get(name, {}))
+        if not payload:
+            return
+        payload["pagerank"] = 0
+        async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
+            resp = await client.put(
+                f"{self.base_url}/api/v1/datasets/{dataset_id}",
+                json=payload,
+                headers={**self.headers, "Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+
+    async def upload_document(self, dataset_id: str, path: Path) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=120, transport=self._transport) as client:
+            files = {"file": (path.name, path.read_bytes(), "text/markdown")}
+            resp = await client.post(
+                f"{self.base_url}/api/v1/datasets/{dataset_id}/documents",
+                files=files,
+                headers=self.headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            uploaded = data.get("data") or []
+            return uploaded[0] if isinstance(uploaded, list) and uploaded else data
+
+    async def parse_documents(self, dataset_id: str, document_ids: list[str]) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=120, transport=self._transport) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/v1/datasets/{dataset_id}/documents/parse",
+                json={"document_ids": document_ids},
+                headers={**self.headers, "Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+            return resp.json()
 
     async def connection_status(self) -> dict[str, Any]:
         datasets = await self.list_datasets()
