@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   profile_name TEXT NOT NULL,
-  source_path TEXT NOT NULL UNIQUE,
+  source_path TEXT NOT NULL,
   source_type TEXT NOT NULL,
   extension TEXT NOT NULL,
   sha256 TEXT NOT NULL,
@@ -22,7 +24,8 @@ CREATE TABLE IF NOT EXISTS source_files (
   tags TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(profile_name, source_path)
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -61,7 +64,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   started_at TEXT,
   finished_at TEXT,
   progress REAL NOT NULL DEFAULT 0,
-  error_summary TEXT NOT NULL DEFAULT ''
+  error_summary TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(source_file_id) REFERENCES source_files(id)
 );
 
 CREATE TABLE IF NOT EXISTS job_events (
@@ -84,10 +88,23 @@ class RagSyncDb:
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    @contextmanager
+    def session(self) -> Iterator[sqlite3.Connection]:
+        conn = self.connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def migrate(self) -> None:
-        with self.connect() as conn:
+        with self.session() as conn:
             conn.executescript(SCHEMA)
 
     def upsert_source_file(
@@ -101,37 +118,22 @@ class RagSyncDb:
         mtime: float,
         state: SourceState,
     ) -> int:
-        with self.connect() as conn:
-            existing = conn.execute(
-                "SELECT id FROM source_files WHERE source_path = ?",
-                (source_path,),
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    """
-                    UPDATE source_files
-                    SET profile_name = ?, source_type = ?, extension = ?, sha256 = ?,
-                        size_bytes = ?, mtime = ?, state = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (
-                        profile_name,
-                        source_type,
-                        extension,
-                        sha256,
-                        size_bytes,
-                        mtime,
-                        state.value,
-                        existing["id"],
-                    ),
-                )
-                return int(existing["id"])
-            cur = conn.execute(
+        with self.session() as conn:
+            row = conn.execute(
                 """
                 INSERT INTO source_files (
                   profile_name, source_path, source_type, extension, sha256,
                   size_bytes, mtime, state
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_name, source_path) DO UPDATE SET
+                  source_type = excluded.source_type,
+                  extension = excluded.extension,
+                  sha256 = excluded.sha256,
+                  size_bytes = excluded.size_bytes,
+                  mtime = excluded.mtime,
+                  state = excluded.state,
+                  updated_at = CURRENT_TIMESTAMP
+                RETURNING id
                 """,
                 (
                     profile_name,
@@ -143,10 +145,12 @@ class RagSyncDb:
                     mtime,
                     state.value,
                 ),
-            )
-            return int(cur.lastrowid)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("source file upsert did not return an id")
+            return int(row["id"])
 
     def list_source_files(self) -> list[dict[str, Any]]:
-        with self.connect() as conn:
+        with self.session() as conn:
             rows = conn.execute("SELECT * FROM source_files ORDER BY source_path").fetchall()
             return [dict(row) for row in rows]
