@@ -1,0 +1,63 @@
+[[profiles]]
+name = "quant-books-md"
+source_paths = ["/home/saulius/atlas/notes/quant/books"]
+file_types = ["pdf"]
+parser_mode = "marker"
+target_dataset = "quant-books-md"
+source_type = "book"
+enabled = true
+max_convert_workers = 1
+max_upload_workers = 4
+max_parse_workers = 2
+
+[profiles.skip_rules]
+path_parts = []
+suffixes = []
+
+[[profiles]]
+name = "quant-papers"
+source_paths = ["/home/saulius/atlas/notes/quant/papers"]
+file_types = ["pdf", "md"]
+parser_mode = "marker"
+target_dataset = "quant-papers"
+source_type = "paper"
+enabled = true
+max_convert_workers = 1
+max_upload_workers = 4
+max_parse_workers = 2
+
+[profiles.skip_rules]
+path_parts = []
+suffixes = []
+
+[[profiles]]
+name = "quant-articles"
+source_paths = ["/home/saulius/atlas/notes/quant/articles"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-articles"
+source_type = "article"
+enabled = true
+max_convert_workers = 1
+max_upload_workers = 4
+max_parse_workers = 2
+
+[profiles.skip_rules]
+path_parts = []
+suffixes = [".excalidraw.md"]
+
+[[profiles]]
+name = "quant-videos"
+source_paths = ["/home/saulius/atlas/notes/quant/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+enabled = true
+max_convert_workers = 1
+max_upload_workers = 4
+max_parse_workers = 2
+
+[profiles.skip_rules]
+path_parts = ["_meta"]
+suffixes = [".excalidraw.md"]
