@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { fetchProfiles, fetchSettings, type AppSettings, type Profile } from './api';
+import { JobsPanel } from './components/JobsPanel';
 import { StatusBadge } from './components/StatusBadge';
 import { FileWorkbench } from './components/FileWorkbench';
 import { loadJson, saveJson } from './storage';
@@ -78,6 +79,8 @@ export function App() {
               profilesError={profilesError}
               profilesLoading={profilesLoading}
             />
+          ) : active === 'Jobs' ? (
+            <JobsPanel />
           ) : active === 'Retrieval Tests' ? (
             <RetrievalPanel />
           ) : active === 'Profiles' ? (

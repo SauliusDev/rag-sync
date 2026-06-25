@@ -208,13 +208,28 @@ class RagSyncDb:
                         (SourceState.MISSING.value, row["id"]),
                     )
 
-    def list_source_files(self) -> list[dict[str, Any]]:
+    def list_source_files(self, profile_names: set[str] | None = None) -> list[dict[str, Any]]:
         with self.session() as conn:
-            rows = conn.execute("SELECT * FROM source_files ORDER BY source_path").fetchall()
+            if profile_names is None:
+                rows = conn.execute(
+                    "SELECT * FROM source_files ORDER BY source_path"
+                ).fetchall()
+            else:
+                if not profile_names:
+                    return []
+                placeholders = ",".join("?" for _ in profile_names)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM source_files
+                    WHERE profile_name IN ({placeholders})
+                    ORDER BY source_path
+                    """,
+                    tuple(sorted(profile_names)),
+                ).fetchall()
             return [dict(row) for row in rows]
 
-    def list_file_summaries(self) -> list[dict[str, Any]]:
-        files = self.list_source_files()
+    def list_file_summaries(self, profile_names: set[str] | None = None) -> list[dict[str, Any]]:
+        files = self.list_source_files(profile_names=profile_names)
         with self.session() as conn:
             for file_row in files:
                 source_file_id = int(file_row["id"])
@@ -246,6 +261,55 @@ class RagSyncDb:
                 file_row["ragflow"] = dict(ragflow) if ragflow is not None else None
                 file_row["job"] = dict(active_job) if active_job is not None else None
         return files
+
+    def cancel_jobs_for_missing_profiles(self, valid_profile_names: set[str]) -> int:
+        if not valid_profile_names:
+            return 0
+        placeholders = ",".join("?" for _ in valid_profile_names)
+        with self.session() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id FROM jobs
+                WHERE status = 'queued'
+                  AND profile_name IS NOT NULL
+                  AND profile_name NOT IN ({placeholders})
+                """,
+                tuple(sorted(valid_profile_names)),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'canceled',
+                        finished_at = CURRENT_TIMESTAMP,
+                        error_summary = 'profile no longer configured'
+                    WHERE id = ?
+                    """,
+                    (int(row["id"]),),
+                )
+            return len(rows)
+
+    def requeue_running_jobs(self) -> int:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM jobs
+                WHERE status = 'running'
+                """
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'queued',
+                        started_at = NULL,
+                        progress = 0,
+                        error_summary = 'worker restarted before job finished'
+                    WHERE id = ?
+                    """,
+                    (int(row["id"]),),
+                )
+            return len(rows)
 
     def create_pipeline_run(
         self,
@@ -407,17 +471,26 @@ class RagSyncDb:
                     (status, progress, error_summary, job_id),
                 )
 
-    def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_jobs(self, limit: int | None = None) -> list[dict[str, Any]]:
         with self.session() as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM jobs
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if limit is None:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    ORDER BY id DESC
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
             return [dict(row) for row in rows]
 
     def job_counts(self) -> dict[str, int]:

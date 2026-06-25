@@ -1,7 +1,8 @@
 import { FileUp, Play, RefreshCcw, WandSparkles } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type UIEvent } from 'react';
 
 import {
+  bulkEnqueueJobs,
   convertFile,
   enqueueJob,
   fetchFiles,
@@ -22,6 +23,87 @@ function formatState(state: string) {
   return state.replace(/_/g, ' ');
 }
 
+export function buildConversionStage(file: SourceFile) {
+  if (file.artifact) {
+    return {
+      label: file.artifact.parser,
+      detail: file.artifact.quality_status,
+      progress: 100,
+      tone: 'completed',
+    };
+  }
+  if (file.job?.status === 'running' && ['sync_file', 'convert'].includes(file.job.kind)) {
+    return {
+      label: 'Marker running',
+      detail: 'Converting',
+      progress: Math.max(8, Math.round((file.job.progress || 0.35) * 100)),
+      tone: 'running',
+    };
+  }
+  if (file.job?.status === 'queued' && ['sync_file', 'convert'].includes(file.job.kind)) {
+    return { label: 'Queued', detail: 'Waiting for conversion', progress: 0, tone: 'queued' };
+  }
+  return {
+    label: formatState(file.state),
+    detail: file.extension,
+    progress: 0,
+    tone: 'queued',
+  };
+}
+
+export function buildRagflowStage(file: SourceFile) {
+  if (file.ragflow?.parse_status === 'parsed') {
+    return {
+      label: 'Parsed',
+      detail:
+        file.ragflow.chunk_count != null ? `${file.ragflow.chunk_count} chunks` : 'Indexed',
+      progress: 100,
+      tone: 'completed',
+    };
+  }
+  if (file.job?.status === 'running' && ['sync_file', 'upload', 'parse'].includes(file.job.kind)) {
+    const hasUpload = Boolean(file.ragflow);
+    return {
+      label: hasUpload ? 'Parsing' : 'Uploading',
+      detail: hasUpload ? 'RAGFlow ingest' : 'Sending markdown',
+      progress: hasUpload ? 82 : 65,
+      tone: 'running',
+    };
+  }
+  if (file.job?.status === 'queued' && ['sync_file', 'upload', 'parse'].includes(file.job.kind)) {
+    return { label: 'Queued', detail: 'Waiting for RAGFlow', progress: 0, tone: 'queued' };
+  }
+  if (file.ragflow?.upload_status === 'uploaded') {
+    return { label: 'Uploaded', detail: 'Ready to parse', progress: 68, tone: 'running' };
+  }
+  return { label: 'Not uploaded', detail: 'No RAGFlow document', progress: 0, tone: 'queued' };
+}
+
+function summarizeCounts(values: string[]) {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([value, count]) => `${value} (${count})`)
+    .join(', ');
+}
+
+export function buildSelectionSummary(files: SourceFile[]) {
+  return {
+    title: `${files.length} files selected`,
+    selectionLabel: 'Bulk selection active',
+    profileSummary: summarizeCounts(files.map((file) => file.profile_name)),
+    typeSummary: summarizeCounts(files.map((file) => file.source_type)),
+    stateSummary: summarizeCounts(files.map((file) => file.state)),
+    parserSummary: summarizeCounts(files.map((file) => file.artifact?.parser ?? 'not converted')),
+    ragflowSummary: summarizeCounts(
+      files.map((file) => file.ragflow?.parse_status ?? 'not uploaded'),
+    ),
+  };
+}
+
 type FileWorkbenchProps = {
   profiles: Profile[];
   profilesError: string;
@@ -37,12 +119,30 @@ const defaultFilters: FileFilterState = {
   ragflow: '',
 };
 
+export const INITIAL_VISIBLE_ROWS = 50;
+const VISIBLE_ROW_BATCH = 50;
+const SCROLL_LOAD_THRESHOLD = 240;
+
+export function growVisibleCount(current: number, total: number) {
+  return Math.min(total, current + VISIBLE_ROW_BATCH);
+}
+
+export function isNearListEnd(metrics: {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+}) {
+  return metrics.scrollTop + metrics.clientHeight >= metrics.scrollHeight - SCROLL_LOAD_THRESHOLD;
+}
+
 export function FileWorkbench({ profiles, profilesError, profilesLoading }: FileWorkbenchProps) {
   const [files, setFiles] = useState<SourceFile[]>([]);
   const [filters, setFilters] = useState<FileFilterState>(() =>
     loadJson('rag-sync.file-filters', defaultFilters),
   );
   const [selected, setSelected] = useState<SourceFile | null>(null);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_ROWS);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [fileAction, setFileAction] = useState<'convert' | 'upload' | 'parse' | ''>('');
@@ -53,6 +153,9 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
     try {
       const nextFiles = await fetchFiles();
       setFiles(nextFiles);
+      setSelectedIds((current) =>
+        current.filter((sourceFileId) => nextFiles.some((file) => file.id === sourceFileId)),
+      );
       setSelected((current) => {
         const rememberedId = loadJson<number | null>('rag-sync.selected-file-id', null);
         const selectedId = current?.id ?? rememberedId;
@@ -141,9 +244,84 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
     );
   }, [files, filters]);
 
+  const visibleFiles = useMemo(
+    () => filtered.slice(0, Math.min(filtered.length, visibleCount)),
+    [filtered, visibleCount],
+  );
+  const visibleFileIds = useMemo(() => visibleFiles.map((file) => file.id), [visibleFiles]);
+  const filteredIds = useMemo(() => filtered.map((file) => file.id), [filtered]);
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectedFiles = useMemo(
+    () => files.filter((file) => selectedIdSet.has(file.id)),
+    [files, selectedIdSet],
+  );
+  const visibleSelectedCount = useMemo(
+    () => visibleFileIds.filter((sourceFileId) => selectedIdSet.has(sourceFileId)).length,
+    [selectedIdSet, visibleFileIds],
+  );
+  const allVisibleSelected = visibleFiles.length > 0 && visibleSelectedCount === visibleFiles.length;
+  const selectedCount = selectedIds.length;
+  const bulkSelectionActive = selectedFiles.length > 1;
+  const selectionSummary = useMemo(
+    () => (bulkSelectionActive ? buildSelectionSummary(selectedFiles) : null),
+    [bulkSelectionActive, selectedFiles],
+  );
+
+  useEffect(() => {
+    setVisibleCount(INITIAL_VISIBLE_ROWS);
+  }, [filters, files]);
+
+  function handleListScroll(event: UIEvent<HTMLDivElement>) {
+    if (visibleCount >= filtered.length) return;
+    const currentTarget = event.currentTarget;
+    if (
+      isNearListEnd({
+        scrollTop: currentTarget.scrollTop,
+        clientHeight: currentTarget.clientHeight,
+        scrollHeight: currentTarget.scrollHeight,
+      })
+    ) {
+      setVisibleCount((current) => growVisibleCount(current, filtered.length));
+    }
+  }
+
   function selectFile(file: SourceFile) {
     setSelected(file);
     saveJson('rag-sync.selected-file-id', file.id);
+  }
+
+  function toggleFileSelection(sourceFileId: number, checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(sourceFileId);
+      } else {
+        next.delete(sourceFileId);
+      }
+      return Array.from(next);
+    });
+  }
+
+  function toggleVisibleSelection(checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      for (const sourceFileId of visibleFileIds) {
+        if (checked) {
+          next.add(sourceFileId);
+        } else {
+          next.delete(sourceFileId);
+        }
+      }
+      return Array.from(next);
+    });
+  }
+
+  function selectFilteredFiles() {
+    setSelectedIds(filteredIds);
+  }
+
+  function clearSelection() {
+    setSelectedIds([]);
   }
 
   function updateFilters(next: FileFilterState) {
@@ -187,6 +365,21 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
     }
   }
 
+  async function enqueueBulk(kind: 'sync_file' | 'sync_filtered') {
+    setError('');
+    try {
+      if (kind === 'sync_file') {
+        if (selectedIds.length === 0) return;
+        await bulkEnqueueJobs({ kind, source_file_ids: selectedIds });
+      } else {
+        await bulkEnqueueJobs({ kind, filters });
+      }
+      await reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : `Failed to enqueue ${kind}`);
+    }
+  }
+
   return (
     <div className="workbench">
       <div className="workbench-toolbar">
@@ -209,74 +402,188 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
       {error ? <p className="inline-error">{error}</p> : null}
 
       <div className="workbench-split">
-        <div className="table-wrap">
-          <table className="file-table">
-            <thead>
-              <tr>
-                <th>File</th>
-                <th>Type</th>
-                <th>Profile</th>
-                <th>Conversion</th>
-                <th>RAGFlow</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
+        <div className="table-pane">
+          <div className="table-toolbar">
+            <div className="table-summary" aria-live="polite">
+              {selectedCount} selected · Showing {Math.min(filtered.length, visibleCount)} of {filtered.length} files
+            </div>
+            <div className="bulk-actions" aria-label="Bulk file actions">
+              <button
+                className="action-button"
+                type="button"
+                onClick={() => toggleVisibleSelection(true)}
+                disabled={visibleFiles.length === 0}
+              >
+                Select visible
+              </button>
+              <button
+                className="action-button"
+                type="button"
+                onClick={selectFilteredFiles}
+                disabled={filtered.length === 0}
+              >
+                Select filtered
+              </button>
+              <button
+                className="action-button"
+                type="button"
+                onClick={clearSelection}
+                disabled={selectedCount === 0}
+              >
+                Clear selection
+              </button>
+              <button
+                className="action-button primary"
+                type="button"
+                onClick={() => enqueueBulk('sync_file')}
+                disabled={selectedCount === 0}
+              >
+                Sync selected
+              </button>
+              <button
+                className="action-button primary"
+                type="button"
+                onClick={() => enqueueBulk('sync_filtered')}
+                disabled={filtered.length === 0}
+              >
+                Sync filtered
+              </button>
+            </div>
+          </div>
+          <div className="table-wrap" onScroll={handleListScroll}>
+            <table className="file-table">
+              <thead>
                 <tr>
-                  <td colSpan={5} className="empty-cell">
-                    Loading files
-                  </td>
+                  <th>
+                    <input
+                      type="checkbox"
+                      aria-label="Select visible files"
+                      checked={allVisibleSelected}
+                      onChange={(event) => toggleVisibleSelection(event.target.checked)}
+                    />
+                  </th>
+                  <th>File</th>
+                  <th>Type</th>
+                  <th>Profile</th>
+                  <th>Conversion</th>
+                  <th>RAGFlow</th>
                 </tr>
-              ) : filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="empty-cell">
-                    No files found
-                  </td>
-                </tr>
-              ) : (
-                filtered.map((file) => (
-                  <tr
-                    key={file.id}
-                    className={selected?.id === file.id ? 'selected' : undefined}
-                    aria-selected={selected?.id === file.id}
-                  >
-                    <td>
-                      <button
-                        className="file-select-button"
-                        type="button"
-                        onClick={() => selectFile(file)}
-                      >
-                        <span className="file-name">{fileName(file.source_path)}</span>
-                        <span className="file-path">{file.source_path}</span>
-                      </button>
-                    </td>
-                    <td>{file.source_type}</td>
-                    <td>{file.profile_name}</td>
-                    <td>
-                      <span className={`state-badge state-${file.artifact ? 'converted' : file.state}`}>
-                        {file.artifact ? file.artifact.parser : formatState(file.state)}
-                      </span>
-                    </td>
-                    <td>
-                      <span
-                        className={`state-badge state-${file.ragflow?.parse_status ?? 'not-uploaded'}`}
-                      >
-                        {file.ragflow?.parse_status ?? 'not uploaded'}
-                      </span>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={6} className="empty-cell">
+                      Loading files
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="empty-cell">
+                      No files found
+                    </td>
+                  </tr>
+                ) : (
+                  visibleFiles.map((file) => (
+                    <tr
+                      key={file.id}
+                      className={selected?.id === file.id ? 'selected' : undefined}
+                      aria-selected={selected?.id === file.id}
+                    >
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${fileName(file.source_path)}`}
+                          checked={selectedIdSet.has(file.id)}
+                          onChange={(event) => toggleFileSelection(file.id, event.target.checked)}
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      </td>
+                      <td>
+                        <button
+                          className="file-select-button"
+                          type="button"
+                          onClick={() => selectFile(file)}
+                        >
+                          <span className="file-name">{fileName(file.source_path)}</span>
+                          <span className="file-path">{file.source_path}</span>
+                        </button>
+                      </td>
+                      <td>{file.source_type}</td>
+                      <td>{file.profile_name}</td>
+                      <td>
+                        <StageCell stage={buildConversionStage(file)} />
+                      </td>
+                      <td>
+                        <StageCell stage={buildRagflowStage(file)} />
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <aside className="file-details" aria-label="File details">
-          {selected ? (
+          {bulkSelectionActive && selectionSummary ? (
+            <>
+              <div>
+                <h2>{selectionSummary.title}</h2>
+                <p>{selectionSummary.selectionLabel}</p>
+              </div>
+              <div className="file-actions" aria-label="Bulk sync actions">
+                <button
+                  className="action-button primary"
+                  type="button"
+                  onClick={() => enqueueBulk('sync_file')}
+                  disabled={selectedCount === 0}
+                >
+                  <Play size={16} aria-hidden="true" />
+                  Sync selected
+                </button>
+                <button
+                  className="action-button"
+                  type="button"
+                  onClick={clearSelection}
+                  disabled={selectedCount === 0}
+                >
+                  <RefreshCcw size={16} aria-hidden="true" />
+                  Clear selection
+                </button>
+              </div>
+              <dl>
+                <div>
+                  <dt>Profiles</dt>
+                  <dd>{selectionSummary.profileSummary}</dd>
+                </div>
+                <div>
+                  <dt>Types</dt>
+                  <dd>{selectionSummary.typeSummary}</dd>
+                </div>
+                <div>
+                  <dt>States</dt>
+                  <dd>{selectionSummary.stateSummary}</dd>
+                </div>
+                <div>
+                  <dt>Parsers</dt>
+                  <dd>{selectionSummary.parserSummary}</dd>
+                </div>
+                <div>
+                  <dt>RAGFlow</dt>
+                  <dd>{selectionSummary.ragflowSummary}</dd>
+                </div>
+              </dl>
+            </>
+          ) : selected ? (
             <>
               <div>
                 <h2>{fileName(selected.source_path)}</h2>
                 <p>{selected.source_path}</p>
+                <p className="details-meta">
+                  {selectedIdSet.has(selected.id)
+                    ? `Selected for bulk actions · ${selectedCount} total selected`
+                    : `${selectedCount} selected`}
+                </p>
               </div>
               <div className="file-actions" aria-label="File sync actions">
                 <button
@@ -341,6 +648,16 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
                   <dd>{formatState(selected.state)}</dd>
                 </div>
                 <div>
+                  <dt>Conversion stage</dt>
+                  <dd>
+                    {buildConversionStage(selected).label} · {buildConversionStage(selected).detail}
+                  </dd>
+                </div>
+                <div>
+                  <dt>RAGFlow stage</dt>
+                  <dd>{buildRagflowStage(selected).label} · {buildRagflowStage(selected).detail}</dd>
+                </div>
+                <div>
                   <dt>Included</dt>
                   <dd>{selected.included ? 'yes' : 'no'}</dd>
                 </div>
@@ -383,6 +700,25 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
           )}
         </aside>
       </div>
+    </div>
+  );
+}
+
+function StageCell({
+  stage,
+}: {
+  stage: { label: string; detail: string; progress: number; tone: string };
+}) {
+  return (
+    <div className="stage-cell">
+      <div className="stage-cell-top">
+        <span className={`state-badge state-${stage.tone}`}>{stage.label}</span>
+        <span className="stage-percent">{stage.progress}%</span>
+      </div>
+      <div className="mini-progress">
+        <span style={{ width: `${stage.progress}%` }} />
+      </div>
+      <div className="stage-detail">{stage.detail}</div>
     </div>
   );
 }

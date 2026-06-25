@@ -58,7 +58,7 @@ def test_discover_files_matches_extensions_case_insensitively(project_tmp: Path)
         source_paths=(source,),
         file_types=("pdf",),
         parser_mode=ParserMode.MARKER,
-        target_dataset="quant-books-md",
+        target_dataset="quant-books",
         source_type="book",
     )
 

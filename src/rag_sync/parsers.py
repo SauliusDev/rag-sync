@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 from rag_sync.artifacts import make_upload_markdown, make_upload_markdown_from_text
 
 MARKER_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/marker/bin/marker"
 MINERU_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/mineru/bin/mineru"
+_active_parser_procs: set[subprocess.Popen[str]] = set()
+_active_parser_procs_lock = Lock()
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,55 @@ def _wrap_parser_output(
     )
 
 
+def _register_parser_process(proc: subprocess.Popen[str]) -> None:
+    with _active_parser_procs_lock:
+        _active_parser_procs.add(proc)
+
+
+def _unregister_parser_process(proc: subprocess.Popen[str]) -> None:
+    with _active_parser_procs_lock:
+        _active_parser_procs.discard(proc)
+
+
+def terminate_active_parser_processes() -> int:
+    with _active_parser_procs_lock:
+        procs = list(_active_parser_procs)
+    terminated = 0
+    for proc in procs:
+        if proc.poll() is not None:
+            _unregister_parser_process(proc)
+            continue
+        try:
+            os.killpg(proc.pid, 15)
+            terminated += 1
+        except ProcessLookupError:
+            pass
+        finally:
+            _unregister_parser_process(proc)
+    return terminated
+
+
+def _run_parser_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    _register_parser_process(proc)
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        _unregister_parser_process(proc)
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode or 0,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 def build_marker_command(source_path: Path, output_path: Path) -> list[str]:
     marker_bin = MARKER_BIN if Path(MARKER_BIN).exists() else shutil.which("marker") or "marker"
     return [
@@ -102,9 +155,12 @@ class MarkerParser:
     ) -> ParserResult:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         raw_dir = _prepare_raw_output_dir(output_path, self.name)
+        input_dir = raw_dir / ".input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, input_dir / source_path.name)
         raw_output_path = raw_dir / output_path.name
-        cmd = build_marker_command(source_path, raw_output_path)
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        cmd = build_marker_command(input_dir, raw_output_path)
+        proc = _run_parser_command(cmd)
         if proc.returncode != 0:
             raise RuntimeError(f"marker failed for {source_path}: {proc.stderr[-1000:]}")
         raw = _single_markdown_output(raw_dir, self.name, source_path)
@@ -140,7 +196,7 @@ class MinerUParser:
             "--table",
             "true",
         ]
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        proc = _run_parser_command(cmd)
         if proc.returncode != 0:
             raise RuntimeError(f"mineru failed for {source_path}: {proc.stderr[-1000:]}")
         raw = _single_markdown_output(raw_dir, self.name, source_path)

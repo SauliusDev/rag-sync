@@ -2,6 +2,11 @@
 
 RAG Sync is a local ingestion control layer for syncing Atlas source files into RAGFlow.
 
+It handles three things:
+- scanning Atlas source folders
+- converting files into clean Markdown artifacts
+- uploading and indexing those artifacts in RAGFlow
+
 Mental model:
 
 ```text
@@ -12,12 +17,28 @@ RAGFlow = indexed retrieval database
 
 The app keeps generated files under `data/`, tracks state in SQLite, and never modifies source files.
 
+## Features
+
+- profile-based source scanning
+- Marker, MinerU, and passthrough parsing
+- queue-based convert/upload/parse workflow
+- web UI for files, jobs, settings, and retrieval test wiring
+- pause and hard-stop controls for long overnight runs
+
 ## Development
 
 ```bash
 uv sync --dev
 uv run pytest
 uv run rag-sync --help
+```
+
+Frontend:
+
+```bash
+cd web
+npm install
+npm run build
 ```
 
 ## Running Locally

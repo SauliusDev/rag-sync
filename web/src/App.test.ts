@@ -1,17 +1,22 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  bulkEnqueueJobs,
   convertFile,
   enqueueJob,
   fetchFiles,
+  fetchJobs,
   fetchProfiles,
   fetchQuerySet,
   fetchSettings,
   fetchStatus,
+  killQueue,
   loadJson,
   parseFile,
+  pauseQueue,
   saveJson,
   scanProfile,
+  resumeQueue,
   uploadFile,
 } from './api';
 
@@ -144,6 +149,65 @@ describe('files API', () => {
     }
   });
 
+  it('posts queue pause and resume requests', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = async (input, init) => {
+      calls.push([input, init]);
+      return new Response(JSON.stringify({ paused: true }), { status: 200 });
+    };
+
+    try {
+      await pauseQueue();
+      await resumeQueue();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(calls).toEqual([
+      ['/api/queue/pause', { method: 'POST' }],
+      ['/api/queue/resume', { method: 'POST' }],
+    ]);
+  });
+
+  it('posts queue kill requests', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = async (input, init) => {
+      calls.push([input, init]);
+      return new Response(
+        JSON.stringify({ paused: true, canceled_running_job: true, terminated_processes: 1 }),
+        { status: 200 },
+      );
+    };
+
+    try {
+      await expect(killQueue()).resolves.toEqual({
+        paused: true,
+        canceled_running_job: true,
+        terminated_processes: 1,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(calls).toEqual([['/api/queue/kill', { method: 'POST' }]]);
+  });
+
+  it('fetches jobs', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ jobs: [{ id: 9, status: 'running', progress: 0.35 }] }), {
+        status: 200,
+      });
+
+    try {
+      await expect(fetchJobs()).resolves.toEqual([{ id: 9, status: 'running', progress: 0.35 }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('posts scan requests for a profile', async () => {
     const originalFetch = globalThis.fetch;
     const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
@@ -234,6 +298,40 @@ describe('files API', () => {
             kind: 'sync_file',
             source_file_id: 7,
             profile_name: 'quant-books',
+          }),
+        },
+      ],
+    ]);
+  });
+
+  it('posts bulk queue job requests', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = async (input, init) => {
+      calls.push([input, init]);
+      return new Response(JSON.stringify({ count: 2, job_ids: [9, 10] }), { status: 200 });
+    };
+
+    try {
+      await expect(
+        bulkEnqueueJobs({
+          kind: 'sync_file',
+          source_file_ids: [7, 8],
+        }),
+      ).resolves.toEqual({ count: 2, job_ids: [9, 10] });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(calls).toEqual([
+      [
+        '/api/jobs/bulk',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind: 'sync_file',
+            source_file_ids: [7, 8],
           }),
         },
       ],

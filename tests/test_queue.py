@@ -93,3 +93,41 @@ def test_run_next_marks_handler_error_failed(project_tmp: Path):
 
     assert row["status"] == "failed"
     assert row["error_summary"] == "marker failed"
+
+
+def test_run_next_marks_canceled_when_kill_requested(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    queue = PersistentJobQueue(db)
+    source_id = _add_source(db, project_tmp)
+
+    async def handler(job):
+        queue.request_cancel_running(job["id"])
+        raise RuntimeError("killed subprocess")
+
+    queue.register(JobKind.CONVERT, handler)
+    job_id = queue.enqueue(
+        kind=JobKind.CONVERT,
+        source_file_id=source_id,
+        profile_name="quant-books",
+    )
+
+    asyncio.run(queue.run_next())
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+
+    assert row["status"] == "canceled"
+    assert row["error_summary"] == "killed by user"
+
+
+def test_request_cancel_running_tracks_current_job(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    queue = PersistentJobQueue(db)
+    queue.current_job_id = 42
+
+    canceled = queue.request_cancel_running()
+
+    assert canceled is True
+    assert 42 in queue.cancel_requested_job_ids

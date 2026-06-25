@@ -214,7 +214,7 @@ class RagFlowClient:
         async with httpx.AsyncClient(timeout=30, transport=self._transport) as client:
             resp = await client.get(
                 f"{self.base_url}/api/v1/datasets/{dataset_id}/documents",
-                params={"page": 1, "page_size": 1000},
+                params={"page": 1, "page_size": 100},
                 headers=self.headers,
             )
             payload = self._response_json(resp)

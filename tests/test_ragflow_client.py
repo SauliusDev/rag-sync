@@ -291,6 +291,7 @@ def test_list_documents_sends_dataset_documents_get():
     request = seen_requests[0]
     assert request.method == "GET"
     assert request.url.path == "/api/v1/datasets/dataset-id/documents"
+    assert request.url.params["page_size"] == "100"
 
 
 def test_stop_documents_posts_document_ids_to_stop_endpoint():

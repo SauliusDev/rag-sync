@@ -1,9 +1,9 @@
 [[profiles]]
-name = "quant-books-md"
+name = "quant-books"
 source_paths = ["/home/saulius/atlas/notes/quant/books"]
 file_types = ["pdf"]
 parser_mode = "marker"
-target_dataset = "quant-books-md"
+target_dataset = "quant-books"
 source_type = "book"
 enabled = true
 max_convert_workers = 1

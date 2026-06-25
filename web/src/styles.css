@@ -50,7 +50,11 @@ button {
 }
 
 .app {
+  display: flex;
   min-height: 100vh;
+  height: 100vh;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
@@ -123,7 +127,7 @@ button {
 .status-badge {
   display: inline-flex;
   min-height: 30px;
-  max-width: 260px;
+  max-width: 280px;
   align-items: center;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -137,16 +141,30 @@ button {
   white-space: nowrap;
 }
 
+.status-badges {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
+  overflow-x: auto;
+}
+
 .main {
+  flex: 1;
+  min-height: 0;
   padding: 18px;
 }
 
 .panel {
-  min-height: calc(100vh - 92px);
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
 .panel-header {
@@ -293,6 +311,9 @@ h1 {
 
 .workbench {
   display: grid;
+  min-height: 0;
+  height: 100%;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
   padding: 16px;
 }
@@ -378,6 +399,12 @@ h1 {
   color: var(--accent);
 }
 
+.action-button.danger {
+  border-color: var(--danger-border);
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
 .action-button:disabled {
   cursor: not-allowed;
   opacity: 0.65;
@@ -398,12 +425,41 @@ h1 {
 
 .workbench-split {
   display: grid;
-  min-height: 520px;
+  min-height: 0;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
   gap: 14px;
+  overflow: hidden;
+}
+
+.table-pane {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+}
+
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.table-summary {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bulk-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .table-wrap {
+  min-height: 0;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -475,26 +531,31 @@ h1 {
 
 .file-table th:first-child,
 .file-table td:first-child {
-  width: 42%;
+  width: 5%;
 }
 
 .file-table th:nth-child(2),
 .file-table td:nth-child(2) {
-  width: 10%;
+  width: 42%;
 }
 
 .file-table th:nth-child(3),
 .file-table td:nth-child(3) {
-  width: 14%;
+  width: 10%;
 }
 
 .file-table th:nth-child(4),
 .file-table td:nth-child(4) {
-  width: 17%;
+  width: 14%;
 }
 
 .file-table th:nth-child(5),
 .file-table td:nth-child(5) {
+  width: 17%;
+}
+
+.file-table th:nth-child(6),
+.file-table td:nth-child(6) {
   width: 17%;
 }
 
@@ -506,7 +567,7 @@ h1 {
 
 .state-badge {
   display: inline-flex;
-  max-width: 120px;
+  max-width: 180px;
   min-height: 24px;
   align-items: center;
   border: 1px solid var(--border);
@@ -525,6 +586,21 @@ h1 {
   color: #16a34a;
 }
 
+.state-completed {
+  border-color: rgb(22 163 74 / 35%);
+  color: #16a34a;
+}
+
+.state-running {
+  border-color: rgb(37 99 235 / 35%);
+  color: var(--accent);
+}
+
+.state-queued {
+  border-color: var(--border);
+  color: var(--muted);
+}
+
 .state-changed,
 .state-missing,
 .state-failed {
@@ -534,6 +610,7 @@ h1 {
 
 .file-details {
   display: grid;
+  min-height: 0;
   align-content: start;
   gap: 16px;
   border: 1px solid var(--border);
@@ -541,6 +618,7 @@ h1 {
   background: var(--surface-subtle);
   padding: 14px;
   min-width: 0;
+  overflow: auto;
 }
 
 .file-details h2 {
@@ -569,6 +647,10 @@ h1 {
   line-height: 1.45;
 }
 
+.details-meta {
+  font-size: 12px;
+}
+
 .file-details dl {
   display: grid;
   gap: 12px;
@@ -586,6 +668,171 @@ h1 {
   overflow-wrap: anywhere;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.stage-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.stage-cell-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stage-percent,
+.stage-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mini-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.mini-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.jobs-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  gap: 12px;
+  padding: 16px;
+}
+
+.jobs-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  position: relative;
+  z-index: 3;
+}
+
+.jobs-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  position: relative;
+  z-index: 2;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+  isolation: isolate;
+}
+
+.jobs-search {
+  max-width: none;
+  width: 100%;
+}
+
+.jobs-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-content: start;
+}
+
+.jobs-summary-card {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.jobs-summary-card strong {
+  font-size: 18px;
+}
+
+.jobs-summary-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.jobs-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  position: relative;
+  z-index: 1;
+}
+
+.jobs-table {
+  width: 100%;
+  min-width: 1060px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.jobs-table-compact {
+  min-width: 920px;
+}
+
+.jobs-table th,
+.jobs-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.jobs-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.job-file {
+  display: grid;
+  gap: 3px;
+}
+
+.job-file strong,
+.job-file span,
+.job-error {
+  overflow-wrap: anywhere;
+}
+
+.job-file span,
+.job-error,
+.job-time,
+.queue-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.queue-cell,
+.job-time {
+  display: grid;
+  gap: 4px;
+}
+
+.job-time {
+  min-width: 170px;
+}
+
+.job-error {
+  max-width: 280px;
 }
 
 .retrieval-list {
@@ -629,12 +876,17 @@ h1 {
     flex-basis: 100%;
   }
 
+  .status-badges {
+    order: 4;
+    flex-basis: 100%;
+  }
+
   .main {
     padding: 12px;
   }
 
   .panel {
-    min-height: calc(100vh - 126px);
+    min-height: 0;
   }
 
   .workbench {
@@ -658,11 +910,27 @@ h1 {
     grid-template-columns: 1fr;
   }
 
+  .table-toolbar {
+    align-items: stretch;
+  }
+
   .file-details {
     order: -1;
   }
 
   .query-card {
     grid-template-columns: 1fr;
+  }
+
+  .jobs-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .jobs-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .jobs-search {
+    width: 100%;
   }
 }

@@ -19,7 +19,7 @@ def test_passthrough_parser_writes_upload_copy(project_tmp: Path):
 
 
 def test_build_marker_command_uses_output_parent(project_tmp: Path):
-    source = project_tmp / "book.pdf"
+    source = project_tmp / "marker-input"
     output = project_tmp / "out" / "book.md"
     cmd = build_marker_command(source, output)
 
@@ -39,6 +39,9 @@ def test_marker_parser_preserves_original_source_and_ignores_stale_output(
     output.write_text("stale final output", encoding="utf-8")
 
     def fake_run(cmd: list[str], **kwargs: object):
+        input_dir = Path(cmd[1])
+        assert input_dir.is_dir()
+        assert (input_dir / "book.pdf").read_bytes() == b"pdf"
         output_dir = Path(cmd[cmd.index("--output_dir") + 1])
         (output_dir / "book.md").write_text("fresh marker body", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")

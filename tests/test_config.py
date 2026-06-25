@@ -17,11 +17,11 @@ def test_load_profiles_reads_quant_defaults(tmp_path: Path):
         tmp_path,
         """
 [[profiles]]
-name = "quant-books-md"
+name = "quant-books"
 source_paths = ["/home/saulius/atlas/notes/quant/books"]
 file_types = ["pdf"]
 parser_mode = "marker"
-target_dataset = "quant-books-md"
+target_dataset = "quant-books"
 source_type = "book"
 enabled = true
 
@@ -34,7 +34,7 @@ suffixes = []
     profiles = load_profiles(config_path)
 
     assert len(profiles) == 1
-    assert profiles[0].name == "quant-books-md"
+    assert profiles[0].name == "quant-books"
     assert profiles[0].source_paths == (Path("/home/saulius/atlas/notes/quant/books"),)
     assert profiles[0].file_types == ("pdf",)
     assert profiles[0].parser_mode == ParserMode.MARKER

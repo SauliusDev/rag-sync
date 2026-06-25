@@ -53,7 +53,40 @@ export type QueueStatus = {
     running?: number;
     failed?: number;
     completed?: number;
+    paused?: boolean;
   };
+  active?: JobRecord | null;
+  system?: Record<string, SystemMetric>;
+};
+
+export type JobStage = {
+  key: string;
+  label: string;
+  status: string;
+  progress: number;
+};
+
+export type JobRecord = {
+  id: number;
+  kind: string;
+  status: string;
+  profile_name?: string | null;
+  source_file_id?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  progress: number;
+  error_summary: string;
+  source_path?: string;
+  file_name?: string;
+  source_type?: string;
+  queue_position?: number;
+  stage?: JobStage;
+};
+
+export type SystemMetric = {
+  label: string;
+  value?: number | null;
+  detail?: string;
 };
 
 export type RetrievalQuery = {
@@ -123,6 +156,47 @@ export async function fetchStatus(): Promise<QueueStatus> {
   return (await response.json()) as QueueStatus;
 }
 
+export async function fetchJobs(): Promise<JobRecord[]> {
+  const response = await fetch('/api/jobs');
+  if (!response.ok) {
+    throw new Error(`Failed to fetch jobs: ${response.status}`);
+  }
+  const data = (await response.json()) as { jobs?: JobRecord[] };
+  return data.jobs ?? [];
+}
+
+export async function pauseQueue(): Promise<{ paused: boolean }> {
+  const response = await fetch('/api/queue/pause', { method: 'POST' });
+  if (!response.ok) {
+    throw new Error(`Failed to pause queue: ${response.status}`);
+  }
+  return (await response.json()) as { paused: boolean };
+}
+
+export async function resumeQueue(): Promise<{ paused: boolean }> {
+  const response = await fetch('/api/queue/resume', { method: 'POST' });
+  if (!response.ok) {
+    throw new Error(`Failed to resume queue: ${response.status}`);
+  }
+  return (await response.json()) as { paused: boolean };
+}
+
+export async function killQueue(): Promise<{
+  paused: boolean;
+  canceled_running_job: boolean;
+  terminated_processes: number;
+}> {
+  const response = await fetch('/api/queue/kill', { method: 'POST' });
+  if (!response.ok) {
+    throw new Error(`Failed to kill queue: ${response.status}`);
+  }
+  return (await response.json()) as {
+    paused: boolean;
+    canceled_running_job: boolean;
+    terminated_processes: number;
+  };
+}
+
 export async function scanProfile(profileName: string): Promise<void> {
   const response = await fetch(`/api/scan/${encodeURIComponent(profileName)}`, {
     method: 'POST',
@@ -185,6 +259,19 @@ export type EnqueueJobRequest = {
   profile_name?: string;
 };
 
+export type BulkEnqueueJobRequest = {
+  kind: 'sync_file' | 'sync_filtered' | 'restart_ragflow' | 'delete_ragflow' | 'stop_ragflow';
+  source_file_ids?: number[];
+  filters?: {
+    query?: string;
+    profile?: string;
+    sourceType?: string;
+    state?: string;
+    parser?: string;
+    ragflow?: string;
+  };
+};
+
 export async function enqueueJob(request: EnqueueJobRequest): Promise<{ job_id: number }> {
   const response = await fetch('/api/jobs', {
     method: 'POST',
@@ -195,6 +282,20 @@ export async function enqueueJob(request: EnqueueJobRequest): Promise<{ job_id: 
     throw new Error(`Failed to enqueue job: ${response.status}`);
   }
   return (await response.json()) as { job_id: number };
+}
+
+export async function bulkEnqueueJobs(
+  request: BulkEnqueueJobRequest,
+): Promise<{ count: number; job_ids: number[]; source_file_ids?: number[] }> {
+  const response = await fetch('/api/jobs/bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to bulk enqueue jobs: ${response.status}`);
+  }
+  return (await response.json()) as { count: number; job_ids: number[]; source_file_ids?: number[] };
 }
 
 export async function fetchQuerySet(name: string): Promise<RetrievalQuery[]> {

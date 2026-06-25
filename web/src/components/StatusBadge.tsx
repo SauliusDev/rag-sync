@@ -29,5 +29,25 @@ export function StatusBadge() {
     };
   }, []);
 
-  return <div className="status-badge">{status?.label ?? 'Loading status'}</div>;
+  const metrics = status?.system ? Object.entries(status.system) : [];
+
+  return (
+    <div className="status-badges" aria-label="System status">
+      <div className="status-badge">
+        {status?.queue?.paused ? 'Paused · ' : ''}
+        {status?.label ?? 'Loading status'}
+      </div>
+      {status?.active?.stage?.label ? (
+        <div className="status-badge">
+          {status.active.stage.label}
+          {status.active.file_name ? ` · ${status.active.file_name}` : ''}
+        </div>
+      ) : null}
+      {metrics.map(([key, metric]) => (
+        <div className="status-badge" key={key} title={metric.detail || metric.label}>
+          {metric.label}
+        </div>
+      ))}
+    </div>
+  );
 }
