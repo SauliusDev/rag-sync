@@ -120,6 +120,23 @@ button {
   border-radius: 6px;
 }
 
+.status-badge {
+  display: inline-flex;
+  min-height: 30px;
+  max-width: 260px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .main {
   padding: 18px;
 }
@@ -206,6 +223,74 @@ h1 {
   line-height: 1.45;
 }
 
+.settings-view {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-section h2 {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.settings-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.settings-list div {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.settings-list dt,
+.settings-table th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.settings-list dd {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.settings-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.settings-table th,
+.settings-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.settings-table th {
+  background: var(--surface-subtle);
+}
+
 .workbench {
   display: grid;
   gap: 12px;
@@ -216,6 +301,26 @@ h1 {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.file-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) repeat(5, minmax(130px, max-content));
+  gap: 10px;
+  align-items: center;
+  flex: 1 1 100%;
+}
+
+.file-filters select {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
 }
 
 .search-field {
@@ -306,9 +411,10 @@ h1 {
 
 .file-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 680px;
   border-collapse: collapse;
   font-size: 13px;
+  table-layout: fixed;
 }
 
 .file-table th,
@@ -363,9 +469,33 @@ h1 {
 
 .file-path {
   margin-top: 3px;
-  max-width: 520px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.file-table th:first-child,
+.file-table td:first-child {
+  width: 42%;
+}
+
+.file-table th:nth-child(2),
+.file-table td:nth-child(2) {
+  width: 10%;
+}
+
+.file-table th:nth-child(3),
+.file-table td:nth-child(3) {
+  width: 14%;
+}
+
+.file-table th:nth-child(4),
+.file-table td:nth-child(4) {
+  width: 17%;
+}
+
+.file-table th:nth-child(5),
+.file-table td:nth-child(5) {
+  width: 17%;
 }
 
 .empty-cell {
@@ -417,6 +547,17 @@ h1 {
   overflow-wrap: anywhere;
   font-size: 16px;
   font-weight: 650;
+}
+
+.file-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.file-actions .action-button {
+  min-width: 0;
+  padding: 0 10px;
 }
 
 .file-details p,
@@ -504,8 +645,13 @@ h1 {
     flex-wrap: wrap;
   }
 
-  .search-field {
+  .file-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .file-filters .search-field {
     flex-basis: 100%;
+    grid-column: 1 / -1;
   }
 
   .workbench-split {

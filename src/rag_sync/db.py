@@ -377,7 +377,9 @@ class RagSyncDb:
                 conn.execute(
                     """
                     UPDATE jobs
-                    SET status = ?, started_at = CURRENT_TIMESTAMP, progress = COALESCE(?, progress),
+                    SET status = ?,
+                        started_at = CURRENT_TIMESTAMP,
+                        progress = COALESCE(?, progress),
                         error_summary = ?
                     WHERE id = ?
                     """,
@@ -387,7 +389,9 @@ class RagSyncDb:
                 conn.execute(
                     """
                     UPDATE jobs
-                    SET status = ?, finished_at = CURRENT_TIMESTAMP, progress = COALESCE(?, progress),
+                    SET status = ?,
+                        finished_at = CURRENT_TIMESTAMP,
+                        progress = COALESCE(?, progress),
                         error_summary = ?
                     WHERE id = ?
                     """,
