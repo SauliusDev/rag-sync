@@ -39,7 +39,9 @@ export async function fetchFiles(): Promise<SourceFile[]> {
 }
 
 export async function scanProfile(profileName: string): Promise<void> {
-  const response = await fetch(`/api/scan/${profileName}`, { method: 'POST' });
+  const response = await fetch(`/api/scan/${encodeURIComponent(profileName)}`, {
+    method: 'POST',
+  });
   if (!response.ok) {
     throw new Error(`Failed to scan ${profileName}: ${response.status}`);
   }

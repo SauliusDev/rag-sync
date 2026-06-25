@@ -49,7 +49,7 @@ export function App() {
             <h1 id="panel-title">{active}</h1>
           </div>
           {active === 'Files' ? (
-            <FileWorkbench />
+            <FileWorkbench profiles={profiles} />
           ) : active === 'Profiles' ? (
             <ProfilesPanel profiles={profiles} error={profilesError} />
           ) : (

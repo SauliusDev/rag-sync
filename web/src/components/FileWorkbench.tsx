@@ -1,7 +1,8 @@
 import { RefreshCcw, Search } from 'lucide-react';
+import type { KeyboardEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 
-import { fetchFiles, scanProfile, type SourceFile } from '../api';
+import { fetchFiles, scanProfile, type Profile, type SourceFile } from '../api';
 
 const defaultProfiles = ['quant-books-md', 'quant-papers', 'quant-articles', 'quant-videos'];
 
@@ -13,7 +14,11 @@ function formatState(state: string) {
   return state.replace(/_/g, ' ');
 }
 
-export function FileWorkbench() {
+type FileWorkbenchProps = {
+  profiles: Profile[];
+};
+
+export function FileWorkbench({ profiles }: FileWorkbenchProps) {
   const [files, setFiles] = useState<SourceFile[]>([]);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<SourceFile | null>(null);
@@ -41,12 +46,22 @@ export function FileWorkbench() {
   }
 
   async function scanDefaultProfiles() {
+    const profileNames =
+      profiles.length > 0 ? profiles.map((profile) => profile.name) : defaultProfiles;
     setWorking(true);
     try {
-      for (const profile of defaultProfiles) {
-        await scanProfile(profile);
+      const failures: string[] = [];
+      for (const profile of profileNames) {
+        try {
+          await scanProfile(profile);
+        } catch {
+          failures.push(profile);
+        }
       }
       await reload();
+      if (failures.length > 0) {
+        setError(`Scan failed for: ${failures.join(', ')}`);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Failed to scan profiles');
     } finally {
@@ -75,6 +90,16 @@ export function FileWorkbench() {
         .includes(normalized),
     );
   }, [files, query]);
+
+  function selectFile(file: SourceFile) {
+    setSelected(file);
+  }
+
+  function selectFileFromKeyboard(event: KeyboardEvent<HTMLTableRowElement>, file: SourceFile) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    selectFile(file);
+  }
 
   return (
     <div className="workbench">
@@ -134,7 +159,11 @@ export function FileWorkbench() {
                   <tr
                     key={file.id}
                     className={selected?.id === file.id ? 'selected' : undefined}
-                    onClick={() => setSelected(file)}
+                    onClick={() => selectFile(file)}
+                    onKeyDown={(event) => selectFileFromKeyboard(event, file)}
+                    tabIndex={0}
+                    role="button"
+                    aria-selected={selected?.id === file.id}
                   >
                     <td>
                       <span className="file-name">{fileName(file.source_path)}</span>

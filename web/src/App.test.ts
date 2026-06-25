@@ -88,11 +88,11 @@ describe('files API', () => {
     };
 
     try {
-      await scanProfile('quant-articles');
+      await scanProfile('quant articles');
     } finally {
       globalThis.fetch = originalFetch;
     }
 
-    expect(calls).toEqual([['/api/scan/quant-articles', { method: 'POST' }]]);
+    expect(calls).toEqual([['/api/scan/quant%20articles', { method: 'POST' }]]);
   });
 });
