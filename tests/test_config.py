@@ -246,6 +246,46 @@ path_parts = "_meta"
         load_profiles(config_path)
 
 
+def test_load_profiles_rejects_skip_rules_non_table(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = "bad-skip-rules"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+skip_rules = []
+""",
+    )
+
+    with pytest.raises(ValueError, match="bad-skip-rules.*skip_rules must be a table"):
+        load_profiles(config_path)
+
+
+def test_load_profiles_rejects_skip_rule_empty_suffix(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = "bad-empty-suffix"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+
+[profiles.skip_rules]
+suffixes = [""]
+""",
+    )
+
+    with pytest.raises(ValueError, match="bad-empty-suffix.*skip_rules.suffixes"):
+        load_profiles(config_path)
+
+
 def test_load_profiles_rejects_skip_rule_suffixes_non_string(tmp_path: Path):
     config_path = write_config(
         tmp_path,
@@ -264,6 +304,25 @@ suffixes = [1]
     )
 
     with pytest.raises(ValueError, match="bad-skip-suffixes.*skip_rules.suffixes"):
+        load_profiles(config_path)
+
+
+def test_load_profiles_rejects_invalid_output_dir(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = "bad-output-dir"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+output_dir = 123
+""",
+    )
+
+    with pytest.raises(ValueError, match="bad-output-dir.*output_dir"):
         load_profiles(config_path)
 
 

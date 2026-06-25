@@ -6,7 +6,6 @@ from typing import Any
 
 from rag_sync.models import ParserMode, Profile, SkipRules
 
-
 DEFAULT_PROFILE_PATH = Path("/home/saulius/atlas-services/rag-sync/config/profiles.toml")
 DEFAULT_DATA_DIR = Path("/home/saulius/atlas-services/rag-sync/data")
 DEFAULT_RAGFLOW_ENV_FILE = Path("/home/saulius/atlas-services/ragflow/source/docker/.env")
@@ -68,22 +67,31 @@ def _string_sequence(
 ) -> tuple[str, ...]:
     value = raw.get(key, [])
     if not isinstance(value, (list, tuple)) or not all(
-        isinstance(item, str) for item in value
+        isinstance(item, str) and item for item in value
     ):
         raise ValueError(
-            f"profile {profile_name}: skip_rules.{key} must be a list of strings"
+            f"profile {profile_name}: skip_rules.{key} must be a list of non-empty strings"
         )
     return tuple(value)
 
 
 def _skip_rules(raw: dict[str, Any] | None, profile_name: str) -> SkipRules:
-    raw = raw or {}
+    raw = {} if raw is None else raw
     if not isinstance(raw, dict):
         raise ValueError(f"profile {profile_name}: skip_rules must be a table")
     return SkipRules(
         path_parts=_string_sequence(raw, "path_parts", profile_name),
         suffixes=_string_sequence(raw, "suffixes", profile_name),
     )
+
+
+def _optional_path(raw: dict[str, Any], key: str, profile_name: str) -> Path | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"profile {profile_name}: {key} must be a non-empty string")
+    return Path(value)
 
 
 def load_profiles(path: Path = DEFAULT_PROFILE_PATH) -> list[Profile]:
@@ -114,7 +122,7 @@ def load_profiles(path: Path = DEFAULT_PROFILE_PATH) -> list[Profile]:
                 target_dataset=target_dataset,
                 source_type=source_type,
                 enabled=_enabled(raw, profile_name),
-                output_dir=Path(raw["output_dir"]) if raw.get("output_dir") else None,
+                output_dir=_optional_path(raw, "output_dir", profile_name),
                 skip_rules=_skip_rules(raw.get("skip_rules"), profile_name),
                 max_convert_workers=_positive_int(
                     raw, "max_convert_workers", 1, profile_name
