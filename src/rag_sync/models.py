@@ -28,6 +28,7 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELED = "canceled"
 
 
 class JobKind(StrEnum):
@@ -35,6 +36,11 @@ class JobKind(StrEnum):
     CONVERT = "convert"
     UPLOAD = "upload"
     PARSE = "parse"
+    STOP_RAGFLOW = "stop_ragflow"
+    DELETE_RAGFLOW = "delete_ragflow"
+    RESTART_RAGFLOW = "restart_ragflow"
+    SYNC_FILE = "sync_file"
+    SYNC_FILTERED = "sync_filtered"
     RETRIEVAL_TEST = "retrieval_test"
 
 

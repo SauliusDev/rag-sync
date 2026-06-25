@@ -77,6 +77,39 @@ CREATE TABLE IF NOT EXISTS job_events (
   data_json TEXT NOT NULL DEFAULT '{}',
   FOREIGN KEY(job_id) REFERENCES jobs(id)
 );
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_file_id INTEGER NOT NULL,
+  profile_name TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  parser TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TEXT,
+  error_summary TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(source_file_id) REFERENCES source_files(id)
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_stage_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER,
+  job_id INTEGER,
+  source_file_id INTEGER NOT NULL,
+  stage TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress REAL NOT NULL DEFAULT 0,
+  progress_message TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TEXT,
+  duration_seconds REAL,
+  error_summary TEXT NOT NULL DEFAULT '',
+  data_json TEXT NOT NULL DEFAULT '{}',
+  FOREIGN KEY(run_id) REFERENCES pipeline_runs(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(source_file_id) REFERENCES source_files(id)
+);
 """
 
 
@@ -178,6 +211,92 @@ class RagSyncDb:
     def list_source_files(self) -> list[dict[str, Any]]:
         with self.session() as conn:
             rows = conn.execute("SELECT * FROM source_files ORDER BY source_path").fetchall()
+            return [dict(row) for row in rows]
+
+    def create_pipeline_run(
+        self,
+        source_file_id: int,
+        profile_name: str,
+        source_type: str,
+        parser: str,
+        trigger: str,
+    ) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO pipeline_runs (
+                  source_file_id, profile_name, source_type, parser, trigger
+                ) VALUES (?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (source_file_id, profile_name, source_type, parser, trigger),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("pipeline run insert did not return an id")
+            return int(row["id"])
+
+    def finish_pipeline_run(self, run_id: int, status: str, error_summary: str = "") -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                UPDATE pipeline_runs
+                SET status = ?, finished_at = CURRENT_TIMESTAMP, error_summary = ?
+                WHERE id = ?
+                """,
+                (status, error_summary, run_id),
+            )
+
+    def record_stage_event(
+        self,
+        run_id: int | None,
+        job_id: int | None,
+        source_file_id: int,
+        stage: str,
+        status: str,
+        progress: float,
+        progress_message: str,
+        duration_seconds: float | None,
+        error_summary: str,
+        data_json: str = "{}",
+    ) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO pipeline_stage_events (
+                  run_id, job_id, source_file_id, stage, status, progress,
+                  progress_message, finished_at, duration_seconds, error_summary, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    run_id,
+                    job_id,
+                    source_file_id,
+                    stage,
+                    status,
+                    progress,
+                    progress_message,
+                    duration_seconds,
+                    error_summary,
+                    data_json,
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("pipeline stage event insert did not return an id")
+            return int(row["id"])
+
+    def recent_stage_events(self, source_file_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM pipeline_stage_events
+                WHERE source_file_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (source_file_id, limit),
+            ).fetchall()
             return [dict(row) for row in rows]
 
     def add_artifact(

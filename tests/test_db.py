@@ -232,3 +232,69 @@ def test_upsert_ragflow_document_inserts_updates_single_row_and_marks_uploaded(
     assert docs[0]["chunk_count"] == 3
     assert docs[0]["token_count"] == 30
     assert row["state"] == "uploaded"
+
+
+def test_migrate_creates_pipeline_history_tables(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+
+    with db.connect() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+    assert "pipeline_runs" in tables
+    assert "pipeline_stage_events" in tables
+
+
+def test_create_pipeline_run_and_stage_event(project_tmp: Path):
+    source_dir = project_tmp / "books"
+    source_dir.mkdir()
+    source_file = source_dir / "book.pdf"
+    source_file.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source_file),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+
+    run_id = db.create_pipeline_run(
+        source_file_id=source_id,
+        profile_name="quant-books",
+        source_type="book",
+        parser="marker",
+        trigger="sync_file",
+    )
+    event_id = db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=source_id,
+        stage="convert",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=12.5,
+        error_summary="",
+        data_json='{"output":"book.md"}',
+    )
+
+    with db.connect() as conn:
+        run = conn.execute("SELECT * FROM pipeline_runs WHERE id = ?", (run_id,)).fetchone()
+        event = conn.execute(
+            "SELECT * FROM pipeline_stage_events WHERE id = ?", (event_id,)
+        ).fetchone()
+
+    assert run["status"] == "running"
+    assert run["trigger"] == "sync_file"
+    assert event["stage"] == "convert"
+    assert event["duration_seconds"] == 12.5
