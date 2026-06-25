@@ -299,6 +299,76 @@ class RagSyncDb:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def create_job(
+        self,
+        kind: str,
+        source_file_id: int | None = None,
+        profile_name: str | None = None,
+    ) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO jobs (kind, status, source_file_id, profile_name)
+                VALUES (?, 'queued', ?, ?)
+                RETURNING id
+                """,
+                (kind, source_file_id, profile_name),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("job insert did not return an id")
+            return int(row["id"])
+
+    def next_queued_job(self) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM jobs
+                WHERE status = 'queued'
+                ORDER BY id
+                LIMIT 1
+                """
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def update_job_status(
+        self,
+        job_id: int,
+        status: str,
+        progress: float | None = None,
+        error_summary: str = "",
+    ) -> None:
+        with self.session() as conn:
+            if status == "running":
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, started_at = CURRENT_TIMESTAMP, progress = COALESCE(?, progress),
+                        error_summary = ?
+                    WHERE id = ?
+                    """,
+                    (status, progress, error_summary, job_id),
+                )
+            elif status in {"completed", "failed", "canceled"}:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, finished_at = CURRENT_TIMESTAMP, progress = COALESCE(?, progress),
+                        error_summary = ?
+                    WHERE id = ?
+                    """,
+                    (status, progress, error_summary, job_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, progress = COALESCE(?, progress), error_summary = ?
+                    WHERE id = ?
+                    """,
+                    (status, progress, error_summary, job_id),
+                )
+
     def add_artifact(
         self,
         source_file_id: int,
