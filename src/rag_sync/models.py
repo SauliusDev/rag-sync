@@ -40,15 +40,15 @@ class JobKind(StrEnum):
 
 @dataclass(frozen=True)
 class SkipRules:
-    path_parts: list[str] = field(default_factory=list)
-    suffixes: list[str] = field(default_factory=list)
+    path_parts: tuple[str, ...] = field(default_factory=tuple)
+    suffixes: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
 class Profile:
     name: str
-    source_paths: list[Path]
-    file_types: list[str]
+    source_paths: tuple[Path, ...]
+    file_types: tuple[str, ...]
     parser_mode: ParserMode
     target_dataset: str
     source_type: str

@@ -1,12 +1,20 @@
 from pathlib import Path
 
-from rag_sync.config import load_profiles
+import pytest
+
+from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
 from rag_sync.models import ParserMode
 
 
-def test_load_profiles_reads_quant_defaults(tmp_path: Path):
+def write_config(tmp_path: Path, content: str) -> Path:
     config_path = tmp_path / "profiles.toml"
-    config_path.write_text(
+    config_path.write_text(content, encoding="utf-8")
+    return config_path
+
+
+def test_load_profiles_reads_quant_defaults(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
         """
 [[profiles]]
 name = "quant-books-md"
@@ -21,20 +29,21 @@ enabled = true
 path_parts = []
 suffixes = []
 """,
-        encoding="utf-8",
     )
 
     profiles = load_profiles(config_path)
 
     assert len(profiles) == 1
     assert profiles[0].name == "quant-books-md"
+    assert profiles[0].source_paths == (Path("/home/saulius/atlas/notes/quant/books"),)
+    assert profiles[0].file_types == ("pdf",)
     assert profiles[0].parser_mode == ParserMode.MARKER
     assert profiles[0].source_type == "book"
 
 
 def test_skip_rules_have_defaults(tmp_path: Path):
-    config_path = tmp_path / "profiles.toml"
-    config_path.write_text(
+    config_path = write_config(
+        tmp_path,
         """
 [[profiles]]
 name = "videos"
@@ -45,10 +54,105 @@ target_dataset = "quant-videos"
 source_type = "video"
 enabled = true
 """,
-        encoding="utf-8",
     )
 
     profile = load_profiles(config_path)[0]
 
-    assert profile.skip_rules.path_parts == []
-    assert profile.skip_rules.suffixes == []
+    assert profile.skip_rules.path_parts == ()
+    assert profile.skip_rules.suffixes == ()
+
+
+def test_load_profiles_reads_committed_config():
+    profiles = load_profiles(DEFAULT_PROFILE_PATH)
+
+    assert len(profiles) == 4
+    quant_videos = next(profile for profile in profiles if profile.name == "quant-videos")
+    assert quant_videos.source_paths == (Path("/home/saulius/atlas/notes/quant/videos"),)
+    assert quant_videos.file_types == ("md",)
+    assert quant_videos.parser_mode == ParserMode.PASSTHROUGH
+    assert quant_videos.skip_rules.path_parts == ("_meta",)
+    assert quant_videos.skip_rules.suffixes == (".excalidraw.md",)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("", "profiles must be a non-empty list"),
+        ("profiles = []", "profiles must be a non-empty list"),
+        (
+            """
+[[profiles]]
+name = "empty-source-paths"
+source_paths = []
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+            "source_paths must be a non-empty list",
+        ),
+        (
+            """
+[[profiles]]
+name = "empty-file-types"
+source_paths = ["/x/videos"]
+file_types = []
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+            "file_types must be a non-empty list",
+        ),
+        (
+            """
+[[profiles]]
+name = "bad-enabled"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+enabled = "false"
+""",
+            "enabled must be a bool",
+        ),
+        (
+            """
+[[profiles]]
+name = "bad-workers"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "passthrough"
+target_dataset = "quant-videos"
+source_type = "video"
+max_upload_workers = 0
+""",
+            "max_upload_workers must be a positive integer",
+        ),
+    ],
+)
+def test_load_profiles_rejects_invalid_config(
+    tmp_path: Path, content: str, message: str
+):
+    config_path = write_config(tmp_path, content)
+
+    with pytest.raises(ValueError, match=message):
+        load_profiles(config_path)
+
+
+def test_load_profiles_reports_invalid_parser_mode_with_profile_name(tmp_path: Path):
+    config_path = write_config(
+        tmp_path,
+        """
+[[profiles]]
+name = "bad-parser"
+source_paths = ["/x/videos"]
+file_types = ["md"]
+parser_mode = "unknown"
+target_dataset = "quant-videos"
+source_type = "video"
+""",
+    )
+
+    with pytest.raises(ValueError, match="bad-parser.*parser_mode"):
+        load_profiles(config_path)
