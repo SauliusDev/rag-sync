@@ -213,6 +213,40 @@ class RagSyncDb:
             rows = conn.execute("SELECT * FROM source_files ORDER BY source_path").fetchall()
             return [dict(row) for row in rows]
 
+    def list_file_summaries(self) -> list[dict[str, Any]]:
+        files = self.list_source_files()
+        with self.session() as conn:
+            for file_row in files:
+                source_file_id = int(file_row["id"])
+                artifact = conn.execute(
+                    """
+                    SELECT *
+                    FROM artifacts
+                    WHERE source_file_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (source_file_id,),
+                ).fetchone()
+                ragflow = conn.execute(
+                    "SELECT * FROM ragflow_documents WHERE source_file_id = ?",
+                    (source_file_id,),
+                ).fetchone()
+                active_job = conn.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE source_file_id = ? AND status IN ('queued', 'running')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (source_file_id,),
+                ).fetchone()
+                file_row["artifact"] = dict(artifact) if artifact is not None else None
+                file_row["ragflow"] = dict(ragflow) if ragflow is not None else None
+                file_row["job"] = dict(active_job) if active_job is not None else None
+        return files
+
     def create_pipeline_run(
         self,
         source_file_id: int,

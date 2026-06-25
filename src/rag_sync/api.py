@@ -110,7 +110,21 @@ def create_app(
 
     @app.get("/api/files")
     def files() -> dict[str, list[dict[str, object]]]:
-        return {"files": db_factory().list_source_files()}
+        return {"files": db_factory().list_file_summaries()}
+
+    @app.get("/api/files/{source_file_id}")
+    def file_detail(source_file_id: int) -> dict[str, object]:
+        db = db_factory()
+        file_row = next(
+            (row for row in db.list_file_summaries() if int(row["id"]) == source_file_id),
+            None,
+        )
+        if file_row is None:
+            raise HTTPException(status_code=404, detail="source file not found")
+        return {
+            "file": file_row,
+            "history": db.recent_stage_events(source_file_id),
+        }
 
     @app.get("/api/jobs")
     def jobs() -> dict[str, object]:

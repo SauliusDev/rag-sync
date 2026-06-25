@@ -338,3 +338,92 @@ def test_ragflow_action_endpoints_enqueue_jobs(tmp_path: Path):
             for row in conn.execute("SELECT kind FROM jobs ORDER BY id").fetchall()
         ]
     assert kinds == ["stop_ragflow", "restart_ragflow", "delete_ragflow"]
+
+
+def test_files_endpoint_includes_latest_artifact_and_ragflow_document(tmp_path: Path):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    artifact = tmp_path / "book.md"
+    artifact.write_text("# Book", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.CONVERTED,
+    )
+    db.add_artifact(
+        source_file_id=source_id,
+        parser="marker",
+        output_path=str(artifact),
+        output_sha256="def",
+        quality_status="clean",
+        warnings_json="[]",
+    )
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-id",
+        dataset_name="quant-books",
+        document_id="doc-id",
+        document_name="book.md",
+        upload_status="uploaded",
+        parse_status="parsed",
+        chunk_count=10,
+        token_count=100,
+    )
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    response = client.get("/api/files")
+
+    file_row = response.json()["files"][0]
+    assert file_row["artifact"]["parser"] == "marker"
+    assert file_row["artifact"]["quality_status"] == "clean"
+    assert file_row["ragflow"]["document_id"] == "doc-id"
+    assert file_row["ragflow"]["chunk_count"] == 10
+
+
+def test_file_detail_endpoint_includes_recent_history(tmp_path: Path):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    run_id = db.create_pipeline_run(
+        source_file_id=source_id,
+        profile_name="quant-books",
+        source_type="book",
+        parser="marker",
+        trigger="sync_file",
+    )
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=source_id,
+        stage="convert",
+        status="completed",
+        progress=1.0,
+        progress_message="converted",
+        duration_seconds=7.0,
+        error_summary="",
+    )
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    response = client.get(f"/api/files/{source_id}")
+
+    assert response.status_code == 200
+    assert response.json()["file"]["id"] == source_id
+    assert response.json()["history"][0]["stage"] == "convert"
