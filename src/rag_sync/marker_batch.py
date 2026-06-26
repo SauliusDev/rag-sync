@@ -106,7 +106,9 @@ def run_batch(
     log_path = output_dir / "logs" / "run.jsonl"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pdf_paths = sorted(path for path in input_dir.rglob("*.pdf") if path.is_file())
+    pdf_paths = sorted(
+        path for path in input_dir.rglob("*") if path.is_file() and path.suffix.lower() == ".pdf"
+    )
     if not pdf_paths:
         raise ValueError(f"input directory contains no PDF files: {input_dir}")
     log_event_to_path(

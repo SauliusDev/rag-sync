@@ -114,6 +114,42 @@ def test_marker_batch_discovers_nested_pdfs_and_preserves_relative_paths(
     assert manifest["files"][0]["markdown_relpath"] == "outputs/quant/books/Book.md"
 
 
+def test_marker_batch_discovers_uppercase_pdf_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    pdf_path = input_dir / "Book.PDF"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    seen_paths: list[Path] = []
+
+    def fake_run_marker(*args, **kwargs):
+        seen_paths.append(kwargs["pdf_path"])
+        output_path = kwargs["markdown_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("# Book\n", encoding="utf-8")
+        return {
+            "markdown_path": output_path,
+            "returncode": 0,
+            "duration_seconds": 0.5,
+        }
+
+    monkeypatch.setattr("rag_sync.marker_batch.run_marker_for_file", fake_run_marker)
+
+    run_batch(
+        input_dir=input_dir,
+        output_dir=tmp_path / "batch",
+        profile="quant-books",
+    )
+
+    manifest = json.loads((tmp_path / "batch" / "manifest.json").read_text(encoding="utf-8"))
+    assert seen_paths == [pdf_path]
+    assert manifest["files"][0]["source_relpath"] == "Book.PDF"
+    assert manifest["files"][0]["markdown_relpath"] == "outputs/Book.md"
+
+
 def test_marker_batch_duplicate_basenames_do_not_collide(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
