@@ -104,13 +104,17 @@ def marker_batch_run(
     tag: Annotated[list[str] | None, typer.Option("--tag")] = None,
     marker_bin: Annotated[str, typer.Option("--marker-bin")] = "marker",
 ) -> None:
-    result = run_marker_batch(
-        input_dir=input_dir,
-        output_dir=output_dir,
-        profile=profile,
-        tags=tuple(tag or ()),
-        marker_bin=marker_bin,
-    )
+    try:
+        result = run_marker_batch(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            profile=profile,
+            tags=tuple(tag or ()),
+            marker_bin=marker_bin,
+        )
+    except Exception as exc:
+        error_console.print(f"[red]Marker batch run failed:[/] {exc}")
+        raise typer.Exit(1) from exc
     typer.echo(
         json.dumps(
             {

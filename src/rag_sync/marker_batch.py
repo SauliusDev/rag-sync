@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +16,8 @@ from rag_sync import __version__
 from rag_sync.ldd import log_event_to_path
 from rag_sync.parsers import build_marker_command
 from rag_sync.scanner import pdf_metadata, sha256_file
+
+MARKER_BATCH_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "1200"))
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,7 @@ def run_marker_for_file(
     pdf_path: Path,
     output_dir: Path,
     work_dir: Path,
+    markdown_path: Path,
     marker_bin: str = "marker",
 ) -> dict[str, object]:
     if work_dir.exists():
@@ -37,15 +43,28 @@ def run_marker_for_file(
     staged_input_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(pdf_path, staged_input_dir / pdf_path.name)
 
-    markdown_path = output_dir / "outputs" / f"{pdf_path.stem}.md"
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
     raw_output_path = work_dir / "raw" / markdown_path.name
     command = build_marker_command(staged_input_dir, raw_output_path)
     command[0] = marker_bin
 
     started = time.monotonic()
-    proc = subprocess.run(command, capture_output=True, text=True, check=False)
-    duration_seconds = time.monotonic() - started
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=MARKER_BATCH_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            with suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGTERM)
+            raise RuntimeError(f"marker timed out after {MARKER_BATCH_TIMEOUT_SECONDS}s") from exc
+    finally:
+        duration_seconds = time.monotonic() - started
 
     raw_output_dir = raw_output_path.parent
     if proc.returncode == 0:
@@ -63,8 +82,8 @@ def run_marker_for_file(
         "markdown_path": markdown_path,
         "returncode": proc.returncode,
         "duration_seconds": duration_seconds,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
+        "stdout": stdout,
+        "stderr": stderr,
     }
 
 
@@ -76,12 +95,20 @@ def run_batch(
     tags: tuple[str, ...] = (),
     marker_bin: str = "marker",
 ) -> BatchRunResult:
+    input_dir = input_dir.resolve()
+    if not input_dir.exists():
+        raise ValueError(f"input directory does not exist: {input_dir}")
+    if not input_dir.is_dir():
+        raise ValueError(f"input path is not a directory: {input_dir}")
+
     batch_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     created_at = datetime.now(UTC).isoformat(timespec="seconds")
     log_path = output_dir / "logs" / "run.jsonl"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pdf_paths = sorted(input_dir.glob("*.pdf"))
+    pdf_paths = sorted(path for path in input_dir.rglob("*.pdf") if path.is_file())
+    if not pdf_paths:
+        raise ValueError(f"input directory contains no PDF files: {input_dir}")
     log_event_to_path(
         log_path,
         "batch.run.started",
@@ -99,17 +126,19 @@ def run_batch(
 
     for pdf_path in pdf_paths:
         started_at = datetime.now(UTC)
+        source_relpath = pdf_path.relative_to(input_dir)
         source_stat = pdf_path.stat()
         source_info = {
             "source_filename": pdf_path.name,
-            "source_relpath": str(pdf_path.relative_to(input_dir)),
+            "source_relpath": str(source_relpath),
             "source_abspath_cluster": str(pdf_path.resolve()),
             "source_sha256": sha256_file(pdf_path),
             "source_size_bytes": source_stat.st_size,
             "source_mtime": source_stat.st_mtime,
             "page_count": pdf_metadata(pdf_path).get("page_count"),
         }
-        work_dir = output_dir / ".work" / pdf_path.stem
+        markdown_path = output_dir / "outputs" / source_relpath.with_suffix(".md")
+        work_dir = output_dir / ".work" / source_relpath.with_suffix("")
         log_event_to_path(
             log_path,
             "file.convert.started",
@@ -124,6 +153,7 @@ def run_batch(
                 pdf_path=pdf_path,
                 output_dir=output_dir,
                 work_dir=work_dir,
+                markdown_path=markdown_path,
                 marker_bin=marker_bin,
             )
             markdown_path = Path(str(result["markdown_path"]))
@@ -148,7 +178,7 @@ def run_batch(
                     duration_seconds=duration_seconds,
                 )
             else:
-                markdown_sha256 = ""
+                markdown_sha256 = "missing"
                 markdown_size_bytes = 0
                 status = "error"
                 error_type = "marker_failed"
@@ -166,11 +196,10 @@ def run_batch(
                     error_message=error_message,
                 )
         except Exception as exc:
-            markdown_path = output_dir / "outputs" / f"{pdf_path.stem}.md"
             returncode = None
             duration_seconds = (datetime.now(UTC) - started_at).total_seconds()
             finished_at = datetime.now(UTC).timestamp()
-            markdown_sha256 = ""
+            markdown_sha256 = "missing"
             markdown_size_bytes = 0
             status = "error"
             error_type = type(exc).__name__

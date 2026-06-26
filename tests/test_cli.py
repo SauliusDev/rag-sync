@@ -231,3 +231,32 @@ def test_marker_batch_run_command_invokes_runner(
     assert payload["batch_id"] == "20260626T120000"
     assert payload["success_count"] == 2
     assert payload["failure_count"] == 1
+
+
+def test_marker_batch_run_command_exits_for_invalid_input_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "missing"
+    output_dir = tmp_path / "batch"
+
+    monkeypatch.setattr(
+        "rag_sync.cli.run_marker_batch",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("input directory does not exist")),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "marker-batch-run",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--profile",
+            "quant-books",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "input directory does not exist" in result.output
