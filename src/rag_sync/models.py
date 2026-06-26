@@ -44,6 +44,14 @@ class JobKind(StrEnum):
     RETRIEVAL_TEST = "retrieval_test"
 
 
+class ImportValidationStatus(StrEnum):
+    MATCH = "match"
+    MISSING_SOURCE = "missing_source"
+    HASH_MISMATCH = "hash_mismatch"
+    MISSING_MARKDOWN = "missing_markdown"
+    FAILED_REMOTE_CONVERSION = "failed_remote_conversion"
+
+
 @dataclass(frozen=True)
 class SkipRules:
     path_parts: tuple[str, ...] = field(default_factory=tuple)
@@ -75,14 +83,8 @@ class DiscoveredFile:
     sha256: str
     size_bytes: int
     mtime: float
-
-
-class ImportValidationStatus(StrEnum):
-    MATCH = "match"
-    MISSING_SOURCE = "missing_source"
-    HASH_MISMATCH = "hash_mismatch"
-    MISSING_MARKDOWN = "missing_markdown"
-    FAILED_REMOTE_CONVERSION = "failed_remote_conversion"
+    page_count: int | None = None
+    pdf_producer: str = ""
 
 
 @dataclass(frozen=True)

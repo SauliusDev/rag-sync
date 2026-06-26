@@ -20,6 +20,8 @@ def test_db_upserts_source_file(project_tmp: Path):
         size_bytes=12,
         mtime=1.0,
         state=SourceState.NEW,
+        page_count=42,
+        pdf_producer="Example Producer",
     )
 
     rows = db.list_source_files()
@@ -28,6 +30,8 @@ def test_db_upserts_source_file(project_tmp: Path):
     assert rows[0]["id"] == file_id
     assert rows[0]["source_path"] == "/tmp/a.md"
     assert rows[0]["state"] == "new"
+    assert rows[0]["page_count"] == 42
+    assert rows[0]["pdf_producer"] == "Example Producer"
 
 
 def test_db_marks_changed_when_hash_changes(project_tmp: Path):
@@ -298,6 +302,18 @@ def test_create_pipeline_run_and_stage_event(project_tmp: Path):
     assert run["trigger"] == "sync_file"
     assert event["stage"] == "convert"
     assert event["duration_seconds"] == 12.5
+
+
+def test_worker_lock_allows_only_one_owner_until_released(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+
+    assert db.acquire_worker_lock("worker-a") is True
+    assert db.acquire_worker_lock("worker-b") is False
+
+    db.release_worker_lock("worker-a")
+
+    assert db.acquire_worker_lock("worker-b") is True
 
 
 def test_db_records_batch_import_and_force_override(tmp_path: Path):
