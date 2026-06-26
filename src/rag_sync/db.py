@@ -268,6 +268,21 @@ class RagSyncDb:
             ).fetchall()
             return {str(row["source_path"]): str(row["sha256"]) for row in rows}
 
+    def find_source_file(
+        self, *, profile_name: str, source_path: str
+    ) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM source_files
+                WHERE profile_name = ? AND source_path = ?
+                LIMIT 1
+                """,
+                (profile_name, source_path),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
     def update_source_pdf_metadata(
         self,
         source_file_id: int,

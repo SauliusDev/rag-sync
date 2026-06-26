@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from rag_sync.db import RagSyncDb
 from rag_sync.models import ImportManifest, ManifestFileRecord
+from rag_sync.models import ImportValidationStatus
 
 
 def load_manifest(path: Path) -> ImportManifest:
@@ -113,3 +115,99 @@ def _parse_str_list(value: Any, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ValueError(field)
     return tuple(value)
+
+
+def classify_manifest_record(
+    manifest_record: ManifestFileRecord,
+    *,
+    batch_dir: Path,
+    local_source: Path | None,
+    local_sha256: str | None,
+) -> ImportValidationStatus:
+    if manifest_record.status != "ok":
+        return ImportValidationStatus.FAILED_REMOTE_CONVERSION
+    if not (batch_dir / manifest_record.markdown_relpath).exists():
+        return ImportValidationStatus.MISSING_MARKDOWN
+    if local_source is None:
+        return ImportValidationStatus.MISSING_SOURCE
+    if local_sha256 != manifest_record.source_sha256:
+        return ImportValidationStatus.HASH_MISMATCH
+    return ImportValidationStatus.MATCH
+
+
+def import_manifest_batch(
+    db: RagSyncDb,
+    batch_dir: Path,
+    *,
+    force: bool = False,
+    reason: str = "",
+) -> dict[str, int | str]:
+    if force and not reason.strip():
+        raise ValueError("force import requires an override reason")
+
+    manifest_path = batch_dir / "manifest.json"
+    manifest = load_manifest(manifest_path)
+    batch_import_id = db.create_import_batch(
+        batch_id=manifest.batch_id,
+        manifest_path=str(manifest_path),
+        profile_name=manifest.profile,
+        parser=manifest.parser,
+        parser_version=manifest.parser_version,
+    )
+
+    imported = 0
+    for record in manifest.files:
+        source_row = db.find_source_file(
+            profile_name=manifest.profile,
+            source_path=record.source_relpath,
+        )
+        local_source = Path(str(source_row["source_path"])) if source_row is not None else None
+        local_sha256 = str(source_row["sha256"]) if source_row is not None else None
+        validation_status = classify_manifest_record(
+            record,
+            batch_dir=batch_dir,
+            local_source=local_source,
+            local_sha256=local_sha256,
+        )
+
+        imported_flag = 0
+        if source_row is not None and (
+            validation_status is ImportValidationStatus.MATCH or force
+        ):
+            markdown_path = batch_dir / record.markdown_relpath
+            db.add_artifact(
+                source_file_id=int(source_row["id"]),
+                parser=manifest.parser,
+                output_path=str(markdown_path),
+                output_sha256=record.markdown_sha256,
+                quality_status="ok",
+                warnings_json="[]",
+            )
+            imported += 1
+            imported_flag = 1
+
+        db.record_import_decision(
+            batch_import_id=batch_import_id,
+            source_file_id=int(source_row["id"]) if source_row is not None else None,
+            source_relpath=record.source_relpath,
+            manifest_source_sha256=record.source_sha256,
+            local_source_sha256=local_sha256 or "",
+            markdown_path=str(batch_dir / record.markdown_relpath),
+            markdown_sha256=record.markdown_sha256,
+            validation_status=validation_status,
+            import_mode=(
+                "force"
+                if force and validation_status is not ImportValidationStatus.MATCH
+                else "strict"
+            ),
+            override_reason=(
+                reason if force and validation_status is not ImportValidationStatus.MATCH else ""
+            ),
+            imported=imported_flag,
+        )
+
+    return {
+        "batch_id": manifest.batch_id,
+        "files": len(manifest.files),
+        "imported": imported,
+    }
