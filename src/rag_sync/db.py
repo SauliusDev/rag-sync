@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from rag_sync.models import SourceState
+from rag_sync.models import ImportValidationStatus, SourceState
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_files (
@@ -459,7 +459,7 @@ class RagSyncDb:
         local_source_sha256: str,
         markdown_path: str,
         markdown_sha256: str,
-        validation_status: str,
+        validation_status: ImportValidationStatus | str,
         import_mode: str = "strict",
         override_reason: str = "",
         imported: int = 0,
@@ -483,7 +483,7 @@ class RagSyncDb:
                     local_source_sha256,
                     markdown_path,
                     markdown_sha256,
-                    validation_status,
+                    str(validation_status),
                     import_mode,
                     override_reason,
                     imported,
@@ -516,7 +516,7 @@ class RagSyncDb:
             (source_file_id,),
         ).fetchone()
         if row is None:
-            return None
+            raise ValueError("source_file_id")
         return int(row["id"])
 
     def create_job(

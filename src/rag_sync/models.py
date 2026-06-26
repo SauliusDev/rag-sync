@@ -112,8 +112,8 @@ class ImportManifest:
     files: tuple[ManifestFileRecord, ...]
     created_at: str | None = None
     host: str | None = None
-    profile: str | None = None
+    profile: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
-    parser: str | None = None
-    parser_version: str | None = None
+    parser: str = ""
+    parser_version: str = ""
     parser_flags: tuple[str, ...] = field(default_factory=tuple)

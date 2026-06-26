@@ -303,6 +303,16 @@ def test_create_pipeline_run_and_stage_event(project_tmp: Path):
 def test_db_records_batch_import_and_force_override(tmp_path: Path):
     db = RagSyncDb(tmp_path / "state.sqlite")
     db.migrate()
+    source_file_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path="/library/quant/books/Book.pdf",
+        source_type="book",
+        extension="pdf",
+        sha256="def",
+        size_bytes=123,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
 
     batch_id = db.create_import_batch(
         batch_id="batch-1",
@@ -313,7 +323,7 @@ def test_db_records_batch_import_and_force_override(tmp_path: Path):
     )
     db.record_import_decision(
         batch_import_id=batch_id,
-        source_file_id=7,
+        source_file_id=source_file_id,
         source_relpath="quant/books/Book.pdf",
         manifest_source_sha256="abc",
         local_source_sha256="def",
@@ -326,6 +336,35 @@ def test_db_records_batch_import_and_force_override(tmp_path: Path):
     )
 
     rows = db.list_import_batch_files(batch_id)
+    assert rows[0]["source_file_id"] == source_file_id
     assert rows[0]["validation_status"] == "hash_mismatch"
     assert rows[0]["import_mode"] == "force"
     assert rows[0]["override_reason"] == "same edition renamed locally"
+
+
+def test_db_record_import_decision_rejects_unknown_source_file_id(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+
+    batch_id = db.create_import_batch(
+        batch_id="batch-1",
+        manifest_path="/tmp/batch/manifest.json",
+        profile_name="quant-books",
+        parser="marker",
+        parser_version="1.10.2",
+    )
+
+    with pytest.raises(ValueError, match="source_file_id"):
+        db.record_import_decision(
+            batch_import_id=batch_id,
+            source_file_id=999,
+            source_relpath="quant/books/Book.pdf",
+            manifest_source_sha256="abc",
+            local_source_sha256="def",
+            markdown_path="/tmp/batch/outputs/book.md",
+            markdown_sha256="ghi",
+            validation_status="hash_mismatch",
+            import_mode="force",
+            override_reason="same edition renamed locally",
+            imported=1,
+        )

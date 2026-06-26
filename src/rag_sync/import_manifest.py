@@ -13,6 +13,9 @@ def load_manifest(path: Path) -> ImportManifest:
         raise ValueError("manifest must be a JSON object")
 
     batch_id = _require_str(payload, "batch_id")
+    profile = _require_str(payload, "profile")
+    parser = _require_str(payload, "parser")
+    parser_version = _require_str(payload, "parser_version")
     files_payload = payload.get("files")
     if not isinstance(files_payload, list):
         raise ValueError("files")
@@ -25,10 +28,10 @@ def load_manifest(path: Path) -> ImportManifest:
         batch_id=batch_id,
         created_at=_optional_str(payload.get("created_at"), "created_at"),
         host=_optional_str(payload.get("host"), "host"),
-        profile=_optional_str(payload.get("profile"), "profile"),
+        profile=profile,
         tags=tags,
-        parser=_optional_str(payload.get("parser"), "parser"),
-        parser_version=_optional_str(payload.get("parser_version"), "parser_version"),
+        parser=parser,
+        parser_version=parser_version,
         parser_flags=parser_flags,
         files=files,
     )
