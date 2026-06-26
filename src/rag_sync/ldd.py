@@ -33,16 +33,18 @@ def _json_default(value: object) -> str:
     return str(value)
 
 
-def log_event(event: str, status: str, **fields: Any) -> None:
+def log_event_to_path(path: Path, event: str, status: str, **fields: Any) -> None:
     record = {
         "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
         "event": event,
         "status": status,
         **fields,
     }
-    path = _log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False, sort_keys=True, default=_json_default)
-    with _log_lock:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+    with _log_lock, path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{line}\n")
+
+
+def log_event(event: str, status: str, **fields: Any) -> None:
+    log_event_to_path(_log_path(), event, status, **fields)

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
+from rag_sync.marker_batch import run_batch as run_marker_batch
 from rag_sync.models import Profile
 from rag_sync.sync import (
     convert_source_file,
@@ -91,6 +94,36 @@ def upload(source_file_id: int, config: Path = DEFAULT_PROFILE_PATH) -> None:
 def parse(source_file_id: int) -> None:
     asyncio.run(parse_uploaded_document(default_db(), source_file_id))
     console.print(f"Parsed document for source file {source_file_id}")
+
+
+@app.command("marker-batch-run")
+def marker_batch_run(
+    input_dir: Annotated[Path, typer.Option("--input-dir")],
+    output_dir: Annotated[Path, typer.Option("--output-dir")],
+    profile: Annotated[str, typer.Option("--profile")],
+    tag: Annotated[list[str] | None, typer.Option("--tag")] = None,
+    marker_bin: Annotated[str, typer.Option("--marker-bin")] = "marker",
+) -> None:
+    result = run_marker_batch(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        profile=profile,
+        tags=tuple(tag or ()),
+        marker_bin=marker_bin,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "batch_id": result.batch_id,
+                "success_count": result.success_count,
+                "failure_count": result.failure_count,
+                "manifest_path": result.manifest_path,
+                "log_path": result.log_path,
+            },
+            indent=2,
+            default=str,
+        )
+    )
 
 
 if __name__ == "__main__":

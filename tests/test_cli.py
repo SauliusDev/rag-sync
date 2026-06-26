@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -174,3 +175,59 @@ def test_parse_command_prints_parsed_message(monkeypatch: pytest.MonkeyPatch):
     assert result.exit_code == 0
     assert "Parsed document for source file 42" in result.output
     assert calls == [(db, 42)]
+
+
+def test_marker_batch_run_command_invokes_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    output_dir = tmp_path / "batch"
+    calls: list[dict[str, object]] = []
+
+    class Result:
+        batch_id = "20260626T120000"
+        success_count = 2
+        failure_count = 1
+        manifest_path = output_dir / "manifest.json"
+        log_path = output_dir / "logs" / "run.jsonl"
+
+    monkeypatch.setattr(
+        "rag_sync.cli.run_marker_batch",
+        lambda **kwargs: calls.append(kwargs) or Result(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "marker-batch-run",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--profile",
+            "quant-books",
+            "--tag",
+            "cluster",
+            "--tag",
+            "nightly",
+            "--marker-bin",
+            "/tmp/marker",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "input_dir": input_dir,
+            "output_dir": output_dir,
+            "profile": "quant-books",
+            "tags": ("cluster", "nightly"),
+            "marker_bin": "/tmp/marker",
+        }
+    ]
+    payload = json.loads(result.output)
+    assert payload["batch_id"] == "20260626T120000"
+    assert payload["success_count"] == 2
+    assert payload["failure_count"] == 1
