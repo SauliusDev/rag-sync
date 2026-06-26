@@ -1,10 +1,30 @@
 from pathlib import Path
-from types import SimpleNamespace
+import json
 
 import pytest
 
+from rag_sync import ldd
 from rag_sync import parsers
 from rag_sync.parsers import MarkerParser, MinerUParser, PassthroughParser, build_marker_command
+
+
+def _fake_completed_process(
+    output_dir: Path,
+    markdown_paths: list[str] | None = None,
+    *,
+    body: str = "body",
+):
+    if markdown_paths:
+        for relative_path in markdown_paths:
+            path = output_dir / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+    return parsers.subprocess.CompletedProcess(
+        args=["parser"],
+        returncode=0,
+        stdout="ok",
+        stderr="",
+    )
 
 
 def test_passthrough_parser_writes_upload_copy(project_tmp: Path):
@@ -43,10 +63,9 @@ def test_marker_parser_preserves_original_source_and_ignores_stale_output(
         assert input_dir.is_dir()
         assert (input_dir / "book.pdf").read_bytes() == b"pdf"
         output_dir = Path(cmd[cmd.index("--output_dir") + 1])
-        (output_dir / "book.md").write_text("fresh marker body", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        return _fake_completed_process(output_dir, ["book.md"], body="fresh marker body")
 
-    monkeypatch.setattr(parsers.subprocess, "run", fake_run)
+    monkeypatch.setattr(parsers, "_run_parser_command", lambda cmd, **kwargs: fake_run(cmd, **kwargs))
 
     result = MarkerParser().convert(source, output, "book", "abc")
 
@@ -67,11 +86,9 @@ def test_mineru_parser_preserves_original_source(
 
     def fake_run(cmd: list[str], **kwargs: object):
         output_dir = Path(cmd[cmd.index("--output") + 1])
-        (output_dir / "nested").mkdir()
-        (output_dir / "nested" / "paper.md").write_text("fresh mineru body", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        return _fake_completed_process(output_dir, ["nested/paper.md"], body="fresh mineru body")
 
-    monkeypatch.setattr(parsers.subprocess, "run", fake_run)
+    monkeypatch.setattr(parsers, "_run_parser_command", lambda cmd, **kwargs: fake_run(cmd, **kwargs))
 
     result = MinerUParser().convert(source, output, "paper", "abc")
 
@@ -91,11 +108,9 @@ def test_marker_parser_fails_when_multiple_markdown_outputs(
 
     def fake_run(cmd: list[str], **kwargs: object):
         output_dir = Path(cmd[cmd.index("--output_dir") + 1])
-        (output_dir / "a.md").write_text("a", encoding="utf-8")
-        (output_dir / "b.md").write_text("b", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return _fake_completed_process(output_dir, ["a.md", "b.md"])
 
-    monkeypatch.setattr(parsers.subprocess, "run", fake_run)
+    monkeypatch.setattr(parsers, "_run_parser_command", lambda cmd, **kwargs: fake_run(cmd, **kwargs))
 
     with pytest.raises(RuntimeError, match="multiple markdown files"):
         MarkerParser().convert(source, output, "book", "abc")
@@ -109,9 +124,10 @@ def test_mineru_parser_fails_when_no_markdown_output(
     output = project_tmp / "out" / "paper.md"
 
     def fake_run(cmd: list[str], **kwargs: object):
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        output_dir = Path(cmd[cmd.index("--output") + 1])
+        return _fake_completed_process(output_dir)
 
-    monkeypatch.setattr(parsers.subprocess, "run", fake_run)
+    monkeypatch.setattr(parsers, "_run_parser_command", lambda cmd, **kwargs: fake_run(cmd, **kwargs))
 
     with pytest.raises(RuntimeError, match="produced no markdown"):
         MinerUParser().convert(source, output, "paper", "abc")
@@ -121,11 +137,89 @@ def test_marker_parser_wraps_nonzero_exit(monkeypatch: pytest.MonkeyPatch, proje
     source = project_tmp / "book.pdf"
     source.write_bytes(b"pdf")
     output = project_tmp / "out" / "book.md"
+    log_path = project_tmp / "rag-sync.log"
+    ldd.set_log_path_for_tests(log_path)
 
     def fake_run(cmd: list[str], **kwargs: object):
-        return SimpleNamespace(returncode=2, stdout="", stderr="boom")
+        return parsers.subprocess.CompletedProcess(
+            args=cmd,
+            returncode=2,
+            stdout="",
+            stderr="boom",
+        )
 
-    monkeypatch.setattr(parsers.subprocess, "run", fake_run)
+    monkeypatch.setattr(parsers, "_run_parser_command", lambda cmd, **kwargs: fake_run(cmd, **kwargs))
 
-    with pytest.raises(RuntimeError, match="marker failed"):
-        MarkerParser().convert(source, output, "book", "abc")
+    try:
+        with pytest.raises(RuntimeError, match="marker failed"):
+            MarkerParser().convert(source, output, "book", "abc")
+    finally:
+        ldd.set_log_path_for_tests(None)
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    failed = [record for record in records if record["event"] == "parser.failed"]
+    assert failed
+    assert failed[-1]["status"] == "error"
+    assert failed[-1]["parser"] == "marker"
+    assert failed[-1]["source_path"] == str(source)
+
+
+def test_run_parser_command_logs_start_and_finish(monkeypatch: pytest.MonkeyPatch, project_tmp: Path):
+    log_path = project_tmp / "rag-sync.log"
+    ldd.set_log_path_for_tests(log_path)
+
+    class FakeProc:
+        pid = 456
+        returncode = 0
+
+        def communicate(self, timeout: float | None = None):
+            return "stdout text", "stderr text"
+
+    monkeypatch.setattr(parsers.subprocess, "Popen", lambda *args, **kwargs: FakeProc())
+
+    try:
+        result = parsers._run_parser_command(
+            ["marker", "input.pdf"],
+            parser_name="marker",
+            timeout_seconds=120,
+        )
+    finally:
+        ldd.set_log_path_for_tests(None)
+
+    assert result.returncode == 0
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["event"] for record in records] == [
+        "parser.command.started",
+        "parser.command.finished",
+    ]
+    assert records[0]["status"] == "ok"
+    assert records[0]["parser"] == "marker"
+    assert records[1]["status"] == "ok"
+    assert records[1]["returncode"] == 0
+    assert records[1]["stdout_bytes"] == len("stdout text")
+    assert records[1]["stderr_bytes"] == len("stderr text")
+
+
+def test_run_parser_command_times_out_and_kills_process(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[int, int]] = []
+
+    class FakeProc:
+        pid = 123
+        returncode = None
+
+        def communicate(self, timeout: float | None = None):
+            raise parsers.subprocess.TimeoutExpired(cmd=["marker"], timeout=timeout)
+
+        def kill(self):
+            self.returncode = -9
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(parsers.subprocess, "Popen", lambda *args, **kwargs: FakeProc())
+    monkeypatch.setattr(parsers.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+
+    with pytest.raises(RuntimeError, match="marker timed out after 120s"):
+        parsers._run_parser_command(["marker"], parser_name="marker", timeout_seconds=120)
+
+    assert calls == [(123, 15)]

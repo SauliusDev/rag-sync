@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
 from rag_sync.artifacts import make_upload_markdown, make_upload_markdown_from_text
+from rag_sync.ldd import log_event
 
 MARKER_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/marker/bin/marker"
 MINERU_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/mineru/bin/mineru"
+MARKER_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "1200"))
+MINERU_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MINERU_TIMEOUT_SECONDS", "1200"))
 _active_parser_procs: set[subprocess.Popen[str]] = set()
 _active_parser_procs_lock = Lock()
 
@@ -51,11 +56,44 @@ def _prepare_raw_output_dir(output_path: Path, parser: str) -> Path:
 
 def _single_markdown_output(raw_dir: Path, parser: str, source_path: Path) -> Path:
     candidates = sorted(raw_dir.rglob("*.md"))
+    log_event(
+        "parser.output.scanned",
+        "ok",
+        parser=parser,
+        source_path=str(source_path),
+        raw_dir=str(raw_dir),
+        markdown_count=len(candidates),
+    )
     if not candidates:
+        log_event(
+            "parser.output.missing",
+            "error",
+            parser=parser,
+            source_path=str(source_path),
+            raw_dir=str(raw_dir),
+        )
         raise RuntimeError(f"{parser} produced no markdown for {source_path}")
     if len(candidates) > 1:
         names = ", ".join(str(path.relative_to(raw_dir)) for path in candidates[:5])
+        log_event(
+            "parser.output.ambiguous",
+            "error",
+            parser=parser,
+            source_path=str(source_path),
+            raw_dir=str(raw_dir),
+            markdown_count=len(candidates),
+            candidates=names,
+        )
         raise RuntimeError(f"{parser} produced multiple markdown files for {source_path}: {names}")
+    log_event(
+        "parser.output.selected",
+        "ok",
+        parser=parser,
+        source_path=str(source_path),
+        raw_dir=str(raw_dir),
+        markdown_path=str(candidates[0]),
+        markdown_bytes=candidates[0].stat().st_size,
+    )
     return candidates[0]
 
 
@@ -106,7 +144,20 @@ def terminate_active_parser_processes() -> int:
     return terminated
 
 
-def _run_parser_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_parser_command(
+    cmd: list[str],
+    *,
+    parser_name: str,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    started = time.monotonic()
+    log_event(
+        "parser.command.started",
+        "ok",
+        parser=parser_name,
+        command=cmd,
+        timeout_seconds=timeout_seconds,
+    )
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -116,9 +167,36 @@ def _run_parser_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     )
     _register_parser_process(proc)
     try:
-        stdout, stderr = proc.communicate()
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            log_event(
+                "parser.command.timeout",
+                "error",
+                parser=parser_name,
+                command=cmd,
+                pid=proc.pid,
+                timeout_seconds=timeout_seconds,
+                duration_seconds=time.monotonic() - started,
+            )
+            raise RuntimeError(f"{parser_name} timed out after {timeout_seconds}s")
     finally:
         _unregister_parser_process(proc)
+    log_event(
+        "parser.command.finished",
+        "ok" if (proc.returncode or 0) == 0 else "error",
+        parser=parser_name,
+        command=cmd,
+        pid=proc.pid,
+        returncode=proc.returncode or 0,
+        stdout_bytes=len(stdout.encode("utf-8")),
+        stderr_bytes=len(stderr.encode("utf-8")),
+        duration_seconds=time.monotonic() - started,
+    )
     return subprocess.CompletedProcess(
         args=cmd,
         returncode=proc.returncode or 0,
@@ -160,8 +238,22 @@ class MarkerParser:
         shutil.copy2(source_path, input_dir / source_path.name)
         raw_output_path = raw_dir / output_path.name
         cmd = build_marker_command(input_dir, raw_output_path)
-        proc = _run_parser_command(cmd)
+        proc = _run_parser_command(
+            cmd,
+            parser_name=self.name,
+            timeout_seconds=MARKER_TIMEOUT_SECONDS,
+        )
         if proc.returncode != 0:
+            log_event(
+                "parser.failed",
+                "error",
+                parser=self.name,
+                source_path=str(source_path),
+                output_path=str(output_path),
+                raw_dir=str(raw_dir),
+                returncode=proc.returncode,
+                stderr_tail=proc.stderr[-1000:],
+            )
             raise RuntimeError(f"marker failed for {source_path}: {proc.stderr[-1000:]}")
         raw = _single_markdown_output(raw_dir, self.name, source_path)
         _wrap_parser_output(raw, source_path, output_path, source_type, self.name, sha256)
@@ -196,8 +288,22 @@ class MinerUParser:
             "--table",
             "true",
         ]
-        proc = _run_parser_command(cmd)
+        proc = _run_parser_command(
+            cmd,
+            parser_name=self.name,
+            timeout_seconds=MINERU_TIMEOUT_SECONDS,
+        )
         if proc.returncode != 0:
+            log_event(
+                "parser.failed",
+                "error",
+                parser=self.name,
+                source_path=str(source_path),
+                output_path=str(output_path),
+                raw_dir=str(raw_dir),
+                returncode=proc.returncode,
+                stderr_tail=proc.stderr[-1000:],
+            )
             raise RuntimeError(f"mineru failed for {source_path}: {proc.stderr[-1000:]}")
         raw = _single_markdown_output(raw_dir, self.name, source_path)
         _wrap_parser_output(raw, source_path, output_path, source_type, self.name, sha256)

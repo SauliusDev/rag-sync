@@ -1,0 +1,1 @@
+"""Standalone parser benchmark utilities."""

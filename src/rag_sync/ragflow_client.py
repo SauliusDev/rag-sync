@@ -35,6 +35,7 @@ def parser_config(
         "delimiter": "\n",
         "html4excel": False,
         "layout_recognize": "DeepDOC",
+        "llm_id": "",
         "topn_tags": 3,
         "filename_embd_weight": 0.1,
         "parent_child": {
@@ -63,7 +64,7 @@ QUANT_DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "description": "Marker-converted quant books for formula-aware Markdown ingestion.",
         "permission": "me",
         "chunk_method": "naive",
-        "parser_config": parser_config(0, 0, 1000, True, parent_child=True),
+        "parser_config": parser_config(0, 0, 1000, False, parent_child=True),
     },
     "quant-videos": {
         "description": "Markdown YouTube notes and transcripts.",
@@ -81,12 +82,9 @@ QUANT_DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "description": "Quant papers; prefer Markdown converted with Marker/Docling/MinerU.",
         "permission": "me",
         "chunk_method": "naive",
-        "parser_config": parser_config(0, 0, 900, True, parent_child=True),
+        "parser_config": parser_config(0, 0, 900, False, parent_child=True),
     },
 }
-
-DEFAULT_EMBEDDING_MODEL = "qwen/qwen3-embedding-8b@openrouter-embed@OpenAI-API-Compatible"
-
 
 def read_env_value(path: Path, key: str) -> str:
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -171,7 +169,6 @@ class RagFlowClient:
             return existing
 
         payload = {"name": name, **QUANT_DATASET_DEFAULTS.get(name, {"chunk_method": "naive"})}
-        payload.setdefault("embedding_model", DEFAULT_EMBEDDING_MODEL)
         async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v1/datasets",
@@ -179,7 +176,15 @@ class RagFlowClient:
                 headers={**self.headers, "Content-Type": "application/json"},
             )
             data = self._response_json(resp)
-            return data.get("data") or data
+            created = data.get("data") or data
+
+        dataset_id = str(created.get("id") or "")
+        if dataset_id:
+            await self.configure_dataset(dataset_id, name)
+            refreshed = await self.find_dataset(name)
+            if refreshed:
+                return refreshed
+        return created
 
     async def configure_dataset(self, dataset_id: str, name: str) -> None:
         if name in PROTECTED_DATASETS:
@@ -189,6 +194,7 @@ class RagFlowClient:
         if not payload:
             return
         await self._guard_protected_dataset_id(dataset_id)
+        payload["embedding_model"] = None
         payload["pagerank"] = 0
         async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
             resp = await client.put(

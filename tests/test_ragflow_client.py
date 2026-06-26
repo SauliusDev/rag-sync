@@ -51,6 +51,7 @@ def test_parser_config_places_ragflow_extension_fields_under_ext():
     assert "toc_extraction" not in config
     assert "table_context_size" not in config
     assert "image_context_size" not in config
+    assert config["llm_id"] == ""
     assert config["ext"] == {
         "toc_extraction": True,
         "table_context_size": 0,
@@ -67,7 +68,7 @@ def test_quant_books_default_uses_renamed_dataset():
     assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["chunk_token_num"] == 1000
     assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["ext"][
         "toc_extraction"
-    ] is True
+    ] is False
     assert QUANT_DATASET_DEFAULTS["quant-books"]["parser_config"]["parent_child"][
         "use_parent_child"
     ] is True
@@ -77,6 +78,9 @@ def test_quant_papers_default_uses_parent_child():
     assert QUANT_DATASET_DEFAULTS["quant-papers"]["chunk_method"] == "naive"
     assert QUANT_DATASET_DEFAULTS["quant-papers"]["parser_config"]["auto_keywords"] == 0
     assert QUANT_DATASET_DEFAULTS["quant-papers"]["parser_config"]["auto_questions"] == 0
+    assert QUANT_DATASET_DEFAULTS["quant-papers"]["parser_config"]["ext"][
+        "toc_extraction"
+    ] is False
     assert QUANT_DATASET_DEFAULTS["quant-papers"]["parser_config"]["parent_child"][
         "use_parent_child"
     ] is True
@@ -185,18 +189,26 @@ def test_ensure_dataset_configures_existing_dataset_without_posting():
     assert put_request.headers["authorization"] == "Bearer secret-value"
     assert json_from_request(put_request) == {
         **QUANT_DATASET_DEFAULTS["quant-videos"],
+        "embedding_model": None,
         "pagerank": 0,
     }
 
 
-def test_ensure_dataset_creates_missing_dataset_with_defaults_and_embedding_model():
+def test_ensure_dataset_creates_missing_dataset_with_defaults():
     seen_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_requests.append(request)
         if request.method == "GET":
-            return httpx.Response(200, json={"data": []})
+            if len(seen_requests) == 1:
+                return httpx.Response(200, json={"data": []})
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "created-id", "name": "quant-papers"}]},
+            )
         if request.method == "POST":
+            return httpx.Response(200, json={"data": {"id": "created-id", "name": "quant-papers"}})
+        if request.method == "PUT":
             return httpx.Response(200, json={"data": {"id": "created-id", "name": "quant-papers"}})
         return httpx.Response(500)
 
@@ -209,14 +221,52 @@ def test_ensure_dataset_creates_missing_dataset_with_defaults_and_embedding_mode
     dataset = asyncio.run(client.ensure_dataset("quant-papers"))
 
     assert dataset == {"id": "created-id", "name": "quant-papers"}
-    assert [request.method for request in seen_requests] == ["GET", "POST"]
+    assert [request.method for request in seen_requests] == ["GET", "POST", "GET", "PUT", "GET"]
     post_request = seen_requests[1]
     assert post_request.url.path == "/api/v1/datasets"
     payload = json_from_request(post_request)
     assert payload == {
         "name": "quant-papers",
         **QUANT_DATASET_DEFAULTS["quant-papers"],
-        "embedding_model": "qwen/qwen3-embedding-8b@openrouter-embed@OpenAI-API-Compatible",
+    }
+    put_request = seen_requests[3]
+    assert put_request.url.path == "/api/v1/datasets/created-id"
+    assert json_from_request(put_request) == {
+        **QUANT_DATASET_DEFAULTS["quant-papers"],
+        "embedding_model": None,
+        "pagerank": 0,
+    }
+
+
+def test_configure_dataset_resets_embedding_model_to_ragflow_default():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "dataset-id", "name": "quant-books"}]},
+            )
+        if request.method == "PUT":
+            return httpx.Response(200, json={"data": {"id": "dataset-id"}})
+        return httpx.Response(500)
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        api_key="secret-value",
+        transport=httpx.MockTransport(handler),
+    )
+
+    asyncio.run(client.configure_dataset("dataset-id", "quant-books"))
+
+    put_request = seen_requests[1]
+    assert put_request.method == "PUT"
+    assert put_request.url.path == "/api/v1/datasets/dataset-id"
+    assert json_from_request(put_request) == {
+        **QUANT_DATASET_DEFAULTS["quant-books"],
+        "embedding_model": None,
+        "pagerank": 0,
     }
 
 
