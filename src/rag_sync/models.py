@@ -75,3 +75,45 @@ class DiscoveredFile:
     sha256: str
     size_bytes: int
     mtime: float
+
+
+class ImportValidationStatus(StrEnum):
+    MATCH = "match"
+    MISSING_SOURCE = "missing_source"
+    HASH_MISMATCH = "hash_mismatch"
+    MISSING_MARKDOWN = "missing_markdown"
+    FAILED_REMOTE_CONVERSION = "failed_remote_conversion"
+
+
+@dataclass(frozen=True)
+class ManifestFileRecord:
+    source_filename: str
+    source_relpath: str
+    source_abspath_cluster: str
+    source_sha256: str
+    source_size_bytes: int
+    source_mtime: float
+    page_count: int | None
+    markdown_relpath: str
+    markdown_sha256: str
+    markdown_size_bytes: int
+    status: str
+    started_at: str | None
+    finished_at: str | None
+    duration_seconds: float | None
+    returncode: int | None
+    error_type: str | None
+    error_message: str | None
+
+
+@dataclass(frozen=True)
+class ImportManifest:
+    batch_id: str
+    files: tuple[ManifestFileRecord, ...]
+    created_at: str | None = None
+    host: str | None = None
+    profile: str | None = None
+    tags: tuple[str, ...] = field(default_factory=tuple)
+    parser: str | None = None
+    parser_version: str | None = None
+    parser_flags: tuple[str, ...] = field(default_factory=tuple)

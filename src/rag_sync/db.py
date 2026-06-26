@@ -110,6 +110,34 @@ CREATE TABLE IF NOT EXISTS pipeline_stage_events (
   FOREIGN KEY(job_id) REFERENCES jobs(id),
   FOREIGN KEY(source_file_id) REFERENCES source_files(id)
 );
+
+CREATE TABLE IF NOT EXISTS batch_imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id TEXT NOT NULL UNIQUE,
+  manifest_path TEXT NOT NULL,
+  profile_name TEXT NOT NULL,
+  parser TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS batch_import_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_import_id INTEGER NOT NULL,
+  source_file_id INTEGER,
+  source_relpath TEXT NOT NULL,
+  manifest_source_sha256 TEXT NOT NULL,
+  local_source_sha256 TEXT NOT NULL DEFAULT '',
+  markdown_path TEXT NOT NULL,
+  markdown_sha256 TEXT NOT NULL,
+  validation_status TEXT NOT NULL,
+  import_mode TEXT NOT NULL DEFAULT 'strict',
+  override_reason TEXT NOT NULL DEFAULT '',
+  imported INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(batch_import_id) REFERENCES batch_imports(id),
+  FOREIGN KEY(source_file_id) REFERENCES source_files(id)
+);
 """
 
 
@@ -396,6 +424,100 @@ class RagSyncDb:
                 (source_file_id, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+
+
+    def create_import_batch(
+        self,
+        *,
+        batch_id: str,
+        manifest_path: str,
+        profile_name: str,
+        parser: str,
+        parser_version: str,
+    ) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO batch_imports (
+                  batch_id, manifest_path, profile_name, parser, parser_version
+                ) VALUES (?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (batch_id, manifest_path, profile_name, parser, parser_version),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("batch import insert did not return an id")
+            return int(row["id"])
+
+    def record_import_decision(
+        self,
+        *,
+        batch_import_id: int,
+        source_file_id: int | None,
+        source_relpath: str,
+        manifest_source_sha256: str,
+        local_source_sha256: str,
+        markdown_path: str,
+        markdown_sha256: str,
+        validation_status: str,
+        import_mode: str = "strict",
+        override_reason: str = "",
+        imported: int = 0,
+    ) -> int:
+        with self.session() as conn:
+            resolved_source_file_id = self._resolve_source_file_id(conn, source_file_id)
+            row = conn.execute(
+                """
+                INSERT INTO batch_import_files (
+                  batch_import_id, source_file_id, source_relpath, manifest_source_sha256,
+                  local_source_sha256, markdown_path, markdown_sha256, validation_status,
+                  import_mode, override_reason, imported
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    batch_import_id,
+                    resolved_source_file_id,
+                    source_relpath,
+                    manifest_source_sha256,
+                    local_source_sha256,
+                    markdown_path,
+                    markdown_sha256,
+                    validation_status,
+                    import_mode,
+                    override_reason,
+                    imported,
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("batch import file insert did not return an id")
+            return int(row["id"])
+
+    def list_import_batch_files(self, batch_import_id: int) -> list[dict[str, Any]]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM batch_import_files
+                WHERE batch_import_id = ?
+                ORDER BY id ASC
+                """,
+                (batch_import_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def _resolve_source_file_id(
+        self, conn: sqlite3.Connection, source_file_id: int | None
+    ) -> int | None:
+        if source_file_id is None:
+            return None
+        row = conn.execute(
+            "SELECT id FROM source_files WHERE id = ?",
+            (source_file_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["id"])
 
     def create_job(
         self,

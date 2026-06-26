@@ -298,3 +298,34 @@ def test_create_pipeline_run_and_stage_event(project_tmp: Path):
     assert run["trigger"] == "sync_file"
     assert event["stage"] == "convert"
     assert event["duration_seconds"] == 12.5
+
+
+def test_db_records_batch_import_and_force_override(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+
+    batch_id = db.create_import_batch(
+        batch_id="batch-1",
+        manifest_path="/tmp/batch/manifest.json",
+        profile_name="quant-books",
+        parser="marker",
+        parser_version="1.10.2",
+    )
+    db.record_import_decision(
+        batch_import_id=batch_id,
+        source_file_id=7,
+        source_relpath="quant/books/Book.pdf",
+        manifest_source_sha256="abc",
+        local_source_sha256="def",
+        markdown_path="/tmp/batch/outputs/book.md",
+        markdown_sha256="ghi",
+        validation_status="hash_mismatch",
+        import_mode="force",
+        override_reason="same edition renamed locally",
+        imported=1,
+    )
+
+    rows = db.list_import_batch_files(batch_id)
+    assert rows[0]["validation_status"] == "hash_mismatch"
+    assert rows[0]["import_mode"] == "force"
+    assert rows[0]["override_reason"] == "same edition renamed locally"
