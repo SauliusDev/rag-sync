@@ -135,12 +135,70 @@ def classify_manifest_record(
     return ImportValidationStatus.MATCH
 
 
+def preview_manifest_batch(
+    db: RagSyncDb,
+    batch_dir: Path,
+    *,
+    selected_relpaths: list[str] | None = None,
+) -> dict[str, object]:
+    manifest = load_manifest(batch_dir / "manifest.json")
+    selected = set(selected_relpaths or [])
+    records = [
+        record
+        for record in manifest.files
+        if not selected or record.source_relpath in selected
+    ]
+    summary_counts = {status.value: 0 for status in ImportValidationStatus}
+    files: list[dict[str, object]] = []
+
+    for record in records:
+        source_row = db.find_source_file(
+            profile_name=manifest.profile,
+            source_path=record.source_relpath,
+        )
+        local_sha256 = str(source_row["sha256"]) if source_row is not None else None
+        validation_status = classify_manifest_record(
+            record,
+            batch_dir=batch_dir,
+            local_source=(
+                Path(str(source_row["source_path"])) if source_row is not None else None
+            ),
+            local_sha256=local_sha256,
+        )
+        summary_counts[validation_status.value] += 1
+        files.append(
+            {
+                "source_relpath": record.source_relpath,
+                "source_filename": record.source_filename,
+                "markdown_relpath": record.markdown_relpath,
+                "status": record.status,
+                "validation_status": validation_status.value,
+                "local_source_sha256": local_sha256,
+                "manifest_source_sha256": record.source_sha256,
+            }
+        )
+
+    return {
+        "batch_id": manifest.batch_id,
+        "profile": manifest.profile,
+        "parser": manifest.parser,
+        "parser_version": manifest.parser_version,
+        "files": files,
+        "summary": {
+            "total": len(records),
+            "importable": summary_counts[ImportValidationStatus.MATCH.value],
+            **summary_counts,
+        },
+    }
+
+
 def import_manifest_batch(
     db: RagSyncDb,
     batch_dir: Path,
     *,
     force: bool = False,
     reason: str = "",
+    selected_relpaths: list[str] | None = None,
 ) -> dict[str, int | str]:
     if force and not reason.strip():
         raise ValueError("force import requires an override reason")
@@ -155,8 +213,15 @@ def import_manifest_batch(
         parser_version=manifest.parser_version,
     )
 
+    selected = set(selected_relpaths or [])
+    records = [
+        record
+        for record in manifest.files
+        if not selected or record.source_relpath in selected
+    ]
+
     imported = 0
-    for record in manifest.files:
+    for record in records:
         source_row = db.find_source_file(
             profile_name=manifest.profile,
             source_path=record.source_relpath,
@@ -208,6 +273,6 @@ def import_manifest_batch(
 
     return {
         "batch_id": manifest.batch_id,
-        "files": len(manifest.files),
+        "files": len(records),
         "imported": imported,
     }

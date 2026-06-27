@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from rag_sync.config import DEFAULT_PROFILE_PATH, DEFAULT_RAGFLOW_BASE_URL, load_profiles
 from rag_sync.db import RagSyncDb
+from rag_sync.import_manifest import import_manifest_batch, preview_manifest_batch
 from rag_sync.models import JobKind, Profile
 from rag_sync.parsers import terminate_active_parser_processes
 from rag_sync.queue import PersistentJobQueue
@@ -50,6 +51,18 @@ class BulkEnqueueJobRequest(BaseModel):
     kind: JobKind
     source_file_ids: list[int] = []
     filters: FileFilterRequest | None = None
+
+
+class ImportBatchPreviewRequest(BaseModel):
+    batch_dir: str
+    selected_relpaths: list[str] = []
+
+
+class ImportBatchRequest(BaseModel):
+    batch_dir: str
+    force: bool = False
+    reason: str = ""
+    selected_relpaths: list[str] = []
 
 
 def format_file_name(source_path: str) -> str:
@@ -668,6 +681,32 @@ def create_app(
             source_file_id=source_file_id,
         )
         return {"job_id": job_id}
+
+    @app.post("/api/import-batches/preview")
+    def preview_import_batch_endpoint(request: ImportBatchPreviewRequest) -> dict[str, object]:
+        return preview_manifest_batch(
+            db,
+            Path(request.batch_dir),
+            selected_relpaths=request.selected_relpaths,
+        )
+
+    @app.post("/api/import-batches/import")
+    def import_batch_endpoint(request: ImportBatchRequest) -> dict[str, object]:
+        if request.force and not request.reason.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="force import requires a non-empty reason",
+            )
+        try:
+            return import_manifest_batch(
+                db,
+                Path(request.batch_dir),
+                force=request.force,
+                reason=request.reason,
+                selected_relpaths=request.selected_relpaths,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/retrieval/query-sets/{name}")
     def retrieval_query_set(name: str) -> dict[str, object]:
