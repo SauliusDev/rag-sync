@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { ImportBatchPreviewResponse } from '../api';
 import {
   buildImportBatchRequest,
+  deriveBatchPreviewState,
   ImportBatchDialog,
 } from './ImportBatchDialog';
 
@@ -79,12 +80,67 @@ describe('ImportBatchDialog', () => {
       buildImportBatchRequest({
         batchDir: '/tmp/batch-1',
         preview: previewFixture,
+        previewBatchDir: '/tmp/batch-1',
         selectedRelpaths: ['books/mismatch.pdf'],
         force: true,
         reason: '   ',
       }),
     ).toEqual({
       error: 'Force import requires a reason',
+    });
+  });
+
+  it('shapes force import payloads to selected hash mismatches only', () => {
+    expect(
+      buildImportBatchRequest({
+        batchDir: '/tmp/batch-1',
+        preview: previewFixture,
+        previewBatchDir: '/tmp/batch-1',
+        selectedRelpaths: ['books/ready.pdf', 'books/mismatch.pdf', 'books/missing.pdf'],
+        force: true,
+        reason: 'same source, local hash changed after rename',
+      }),
+    ).toEqual({
+      request: {
+        batch_dir: '/tmp/batch-1',
+        force: true,
+        reason: 'same source, local hash changed after rename',
+        selected_relpaths: ['books/mismatch.pdf'],
+      },
+    });
+  });
+
+  it('invalidates stale preview state on batch dir change and failed re-preview', () => {
+    expect(
+      deriveBatchPreviewState({
+        batchDir: '/tmp/batch-2',
+        preview: previewFixture,
+        previewBatchDir: '/tmp/batch-1',
+        selectedRelpaths: ['books/ready.pdf', 'books/mismatch.pdf'],
+        forceReason: 'previous override',
+      }),
+    ).toEqual({
+      preview: null,
+      previewBatchDir: '',
+      selectedRelpaths: [],
+      forceReason: '',
+      canImport: false,
+    });
+
+    expect(
+      deriveBatchPreviewState({
+        batchDir: '/tmp/batch-1',
+        preview: null,
+        previewBatchDir: '',
+        selectedRelpaths: [],
+        forceReason: '',
+      }),
+    ).toEqual({
+      preview: null,
+      previewBatchDir: '',
+      selectedRelpaths: [],
+      forceReason: '',
+      canImport: false,
     });
   });
 });

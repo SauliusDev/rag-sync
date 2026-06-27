@@ -23,9 +23,26 @@ type ImportBatchDialogProps = {
 type BuildImportBatchRequestArgs = {
   batchDir: string;
   preview: ImportBatchPreviewResponse | null;
+  previewBatchDir: string;
   selectedRelpaths: string[];
   force: boolean;
   reason: string;
+};
+
+type DeriveBatchPreviewStateArgs = {
+  batchDir: string;
+  preview: ImportBatchPreviewResponse | null;
+  previewBatchDir: string;
+  selectedRelpaths: string[];
+  forceReason: string;
+};
+
+type DerivedBatchPreviewState = {
+  preview: ImportBatchPreviewResponse | null;
+  previewBatchDir: string;
+  selectedRelpaths: string[];
+  forceReason: string;
+  canImport: boolean;
 };
 
 const readyStatuses = new Set<ImportBatchValidationStatus>(['match']);
@@ -33,6 +50,10 @@ const forceableStatuses = new Set<ImportBatchValidationStatus>(['hash_mismatch']
 
 function formatCount(count: number, label: string) {
   return `${count} ${label}`;
+}
+
+export function normalizeBatchDir(batchDir: string) {
+  return batchDir.trim();
 }
 
 export function formatImportValidationStatus(status: ImportBatchValidationStatus) {
@@ -49,26 +70,33 @@ export function defaultImportBatchSelection(preview: ImportBatchPreviewResponse 
 export function buildImportBatchRequest({
   batchDir,
   preview,
+  previewBatchDir,
   selectedRelpaths,
   force,
   reason,
 }: BuildImportBatchRequestArgs): { request: ImportBatchRequest } | { error: string } {
-  const normalizedBatchDir = batchDir.trim();
+  const normalizedBatchDir = normalizeBatchDir(batchDir);
   if (!normalizedBatchDir) {
     return { error: 'Batch directory is required' };
   }
   if (!preview) {
     return { error: 'Preview the batch before importing' };
   }
+  if (previewBatchDir !== normalizedBatchDir) {
+    return { error: 'Preview the current batch directory before importing' };
+  }
 
   const selected = new Set(selectedRelpaths);
   const selectedFiles = preview.files.filter((file) => selected.has(file.source_relpath));
 
   if (force) {
+    const forceableFiles = selectedFiles.filter((file) =>
+      forceableStatuses.has(file.validation_status),
+    );
     if (selectedFiles.length === 0) {
       return { error: 'Select at least one batch row to force import' };
     }
-    if (!selectedFiles.some((file) => forceableStatuses.has(file.validation_status))) {
+    if (forceableFiles.length === 0) {
       return { error: 'Select at least one hash mismatch to force import' };
     }
     if (!reason.trim()) {
@@ -79,7 +107,7 @@ export function buildImportBatchRequest({
         batch_dir: normalizedBatchDir,
         force: true,
         reason: reason.trim(),
-        selected_relpaths: selectedFiles.map((file) => file.source_relpath),
+        selected_relpaths: forceableFiles.map((file) => file.source_relpath),
       },
     };
   }
@@ -94,6 +122,32 @@ export function buildImportBatchRequest({
       batch_dir: normalizedBatchDir,
       selected_relpaths: readyFiles.map((file) => file.source_relpath),
     },
+  };
+}
+
+export function deriveBatchPreviewState({
+  batchDir,
+  preview,
+  previewBatchDir,
+  selectedRelpaths,
+  forceReason,
+}: DeriveBatchPreviewStateArgs): DerivedBatchPreviewState {
+  const normalizedBatchDir = normalizeBatchDir(batchDir);
+  if (!preview || !previewBatchDir || previewBatchDir !== normalizedBatchDir) {
+    return {
+      preview: null,
+      previewBatchDir: '',
+      selectedRelpaths: [],
+      forceReason: '',
+      canImport: false,
+    };
+  }
+  return {
+    preview,
+    previewBatchDir,
+    selectedRelpaths,
+    forceReason,
+    canImport: true,
   };
 }
 
@@ -117,6 +171,9 @@ export function ImportBatchDialog({
 }: ImportBatchDialogProps) {
   const [batchDir, setBatchDir] = useState(initialBatchDir);
   const [preview, setPreview] = useState<ImportBatchPreviewResponse | null>(initialPreview);
+  const [previewBatchDir, setPreviewBatchDir] = useState(
+    initialPreview ? normalizeBatchDir(initialBatchDir) : '',
+  );
   const [selectedRelpaths, setSelectedRelpaths] = useState<string[]>(
     initialSelectedRelpaths ?? defaultImportBatchSelection(initialPreview),
   );
@@ -125,10 +182,18 @@ export function ImportBatchDialog({
   const [loadingImport, setLoadingImport] = useState<'strict' | 'force' | ''>('');
   const [error, setError] = useState('');
 
+  const currentPreviewState = deriveBatchPreviewState({
+    batchDir,
+    preview,
+    previewBatchDir,
+    selectedRelpaths,
+    forceReason,
+  });
+  const activePreview = currentPreviewState.preview;
   const selectedSet = useMemo(() => new Set(selectedRelpaths), [selectedRelpaths]);
   const selectedFiles = useMemo(
-    () => preview?.files.filter((file) => selectedSet.has(file.source_relpath)) ?? [],
-    [preview, selectedSet],
+    () => activePreview?.files.filter((file) => selectedSet.has(file.source_relpath)) ?? [],
+    [activePreview, selectedSet],
   );
   const selectedReadyCount = selectedFiles.filter((file) =>
     readyStatuses.has(file.validation_status),
@@ -150,8 +215,8 @@ export function ImportBatchDialog({
   }
 
   function selectByStatus(mode: 'ready' | 'mismatch') {
-    if (!preview) return;
-    const next = preview.files
+    if (!activePreview) return;
+    const next = activePreview.files
       .filter((file) =>
         mode === 'ready'
           ? readyStatuses.has(file.validation_status)
@@ -162,20 +227,30 @@ export function ImportBatchDialog({
   }
 
   async function handlePreview() {
-    const normalizedBatchDir = batchDir.trim();
+    const normalizedBatchDir = normalizeBatchDir(batchDir);
     if (!normalizedBatchDir) {
+      setPreview(null);
+      setPreviewBatchDir('');
+      setSelectedRelpaths([]);
+      setForceReason('');
       setError('Batch directory is required');
       return;
     }
 
     setLoadingPreview(true);
+    setPreview(null);
+    setPreviewBatchDir('');
+    setSelectedRelpaths([]);
+    setForceReason('');
     setError('');
     try {
       const nextPreview = await previewImportBatch({ batch_dir: normalizedBatchDir });
       setPreview(nextPreview);
+      setPreviewBatchDir(normalizedBatchDir);
       setSelectedRelpaths(defaultImportBatchSelection(nextPreview));
-      setForceReason('');
     } catch (cause) {
+      setPreview(null);
+      setPreviewBatchDir('');
       setError(cause instanceof Error ? cause.message : 'Failed to preview import batch');
     } finally {
       setLoadingPreview(false);
@@ -185,7 +260,8 @@ export function ImportBatchDialog({
   async function handleImport(force: boolean) {
     const submission = buildImportBatchRequest({
       batchDir,
-      preview,
+      preview: activePreview,
+      previewBatchDir: currentPreviewState.previewBatchDir,
       selectedRelpaths,
       force,
       reason: forceReason,
@@ -231,7 +307,18 @@ export function ImportBatchDialog({
             <input
               type="text"
               value={batchDir}
-              onChange={(event) => setBatchDir(event.target.value)}
+              onChange={(event) => {
+                const nextBatchDir = event.target.value;
+                setBatchDir(nextBatchDir);
+                const normalizedNext = normalizeBatchDir(nextBatchDir);
+                if (previewBatchDir && previewBatchDir !== normalizedNext) {
+                  setPreview(null);
+                  setPreviewBatchDir('');
+                  setSelectedRelpaths([]);
+                  setForceReason('');
+                  setError('');
+                }
+              }}
               placeholder="/path/to/batch-dir"
             />
           </label>
@@ -248,29 +335,29 @@ export function ImportBatchDialog({
 
         {error ? <p className="inline-error">{error}</p> : null}
 
-        {preview ? (
+        {activePreview ? (
           <>
             <div className="import-batch-summary">
               <div className="import-batch-card">
                 <dt>Batch</dt>
-                <dd>{preview.batch_id}</dd>
+                <dd>{activePreview.batch_id}</dd>
               </div>
               <div className="import-batch-card">
                 <dt>Profile</dt>
-                <dd>{preview.profile}</dd>
+                <dd>{activePreview.profile}</dd>
               </div>
               <div className="import-batch-card">
                 <dt>Parser</dt>
                 <dd>
-                  {preview.parser} {preview.parser_version}
+                  {activePreview.parser} {activePreview.parser_version}
                 </dd>
               </div>
               <div className="import-batch-card">
                 <dt>Summary</dt>
                 <dd>
-                  {formatCount(preview.summary.total, 'files')} ·{' '}
-                  {formatCount(preview.summary.importable, 'ready')} ·{' '}
-                  {formatCount(preview.summary.hash_mismatch, 'mismatch')}
+                  {formatCount(activePreview.summary.total, 'files')} ·{' '}
+                  {formatCount(activePreview.summary.importable, 'ready')} ·{' '}
+                  {formatCount(activePreview.summary.hash_mismatch, 'mismatch')}
                 </dd>
               </div>
             </div>
@@ -308,7 +395,7 @@ export function ImportBatchDialog({
                   </tr>
                 </thead>
                 <tbody>
-                  {preview.files.map((file) => (
+                  {activePreview.files.map((file) => (
                     <tr key={file.source_relpath}>
                       <td>
                         <input
