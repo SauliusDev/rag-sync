@@ -55,14 +55,14 @@ class BulkEnqueueJobRequest(BaseModel):
 
 class ImportBatchPreviewRequest(BaseModel):
     batch_dir: str
-    selected_relpaths: list[str] = []
+    selected_relpaths: list[str] | None = None
 
 
 class ImportBatchRequest(BaseModel):
     batch_dir: str
     force: bool = False
     reason: str = ""
-    selected_relpaths: list[str] = []
+    selected_relpaths: list[str] | None = None
 
 
 def format_file_name(source_path: str) -> str:
@@ -684,11 +684,14 @@ def create_app(
 
     @app.post("/api/import-batches/preview")
     def preview_import_batch_endpoint(request: ImportBatchPreviewRequest) -> dict[str, object]:
-        return preview_manifest_batch(
-            db,
-            Path(request.batch_dir),
-            selected_relpaths=request.selected_relpaths,
-        )
+        try:
+            return preview_manifest_batch(
+                db,
+                Path(request.batch_dir),
+                selected_relpaths=request.selected_relpaths,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/import-batches/import")
     def import_batch_endpoint(request: ImportBatchRequest) -> dict[str, object]:

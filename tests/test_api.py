@@ -221,6 +221,139 @@ source_type = "article"
     assert files[0]["source_path"].endswith("example.md")
 
 
+def test_batch_preview_endpoint_returns_file_statuses(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    db.upsert_source_file(
+        profile_name="quant-books",
+        source_path="quant/books/Book.pdf",
+        source_type="book",
+        extension=".pdf",
+        sha256="abc",
+        size_bytes=123,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    batch_dir = make_import_batch_dir(
+        tmp_path,
+        source_relpath="quant/books/Book.pdf",
+        source_sha256="abc",
+    )
+    response = client.post("/api/import-batches/preview", json={"batch_dir": str(batch_dir)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total"] == 1
+    assert payload["files"][0]["validation_status"] == "match"
+
+
+def test_batch_preview_endpoint_treats_explicit_empty_selection_as_zero_files(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    db.upsert_source_file(
+        profile_name="quant-books",
+        source_path="quant/books/Book.pdf",
+        source_type="book",
+        extension=".pdf",
+        sha256="abc",
+        size_bytes=123,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    batch_dir = make_import_batch_dir(
+        tmp_path,
+        source_relpath="quant/books/Book.pdf",
+        source_sha256="abc",
+    )
+    response = client.post(
+        "/api/import-batches/preview",
+        json={"batch_dir": str(batch_dir), "selected_relpaths": []},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total"] == 0
+    assert payload["files"] == []
+
+
+def test_batch_preview_endpoint_returns_400_for_missing_manifest(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    missing_dir = tmp_path / "missing-batch"
+    response = client.post("/api/import-batches/preview", json={"batch_dir": str(missing_dir)})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid batch_dir or manifest"
+
+
+def test_batch_import_endpoint_requires_reason_for_force(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    batch_dir = make_import_batch_dir(
+        tmp_path,
+        source_relpath="quant/books/Book.pdf",
+        source_sha256="remote",
+    )
+    response = client.post(
+        "/api/import-batches/import",
+        json={"batch_dir": str(batch_dir), "force": True, "reason": "   "},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "force import requires a non-empty reason"
+
+
+def test_batch_import_endpoint_treats_explicit_empty_selection_as_zero_files(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path="quant/books/Book.pdf",
+        source_type="book",
+        extension=".pdf",
+        sha256="abc",
+        size_bytes=123,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    batch_dir = make_import_batch_dir(
+        tmp_path,
+        source_relpath="quant/books/Book.pdf",
+        source_sha256="abc",
+    )
+    response = client.post(
+        "/api/import-batches/import",
+        json={"batch_dir": str(batch_dir), "selected_relpaths": []},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["files"] == 0
+    assert response.json()["imported"] == 0
+    assert db.latest_artifact_for_source(source_id) is None
+
+
+def test_batch_import_endpoint_returns_400_for_missing_manifest(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    missing_dir = tmp_path / "missing-batch"
+    response = client.post("/api/import-batches/import", json={"batch_dir": str(missing_dir)})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid batch_dir or manifest"
+
+
 def test_retrieval_query_set_endpoint_returns_formula_benchmark():
     client = TestClient(create_app())
 

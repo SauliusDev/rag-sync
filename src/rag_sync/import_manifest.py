@@ -9,6 +9,9 @@ from rag_sync.models import ImportManifest, ManifestFileRecord
 from rag_sync.models import ImportValidationStatus
 
 
+INVALID_BATCH_DIR_DETAIL = "invalid batch_dir or manifest"
+
+
 def load_manifest(path: Path) -> ImportManifest:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -37,6 +40,15 @@ def load_manifest(path: Path) -> ImportManifest:
         parser_flags=parser_flags,
         files=files,
     )
+
+
+def load_batch_manifest(batch_dir: Path) -> tuple[Path, ImportManifest]:
+    manifest_path = batch_dir / "manifest.json"
+    try:
+        manifest = load_manifest(manifest_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(INVALID_BATCH_DIR_DETAIL) from exc
+    return manifest_path, manifest
 
 
 def _parse_file_record(item: Any, index: int) -> ManifestFileRecord:
@@ -141,12 +153,12 @@ def preview_manifest_batch(
     *,
     selected_relpaths: list[str] | None = None,
 ) -> dict[str, object]:
-    manifest = load_manifest(batch_dir / "manifest.json")
-    selected = set(selected_relpaths or [])
+    _, manifest = load_batch_manifest(batch_dir)
+    selected = None if selected_relpaths is None else set(selected_relpaths)
     records = [
         record
         for record in manifest.files
-        if not selected or record.source_relpath in selected
+        if selected is None or record.source_relpath in selected
     ]
     summary_counts = {status.value: 0 for status in ImportValidationStatus}
     files: list[dict[str, object]] = []
@@ -203,8 +215,7 @@ def import_manifest_batch(
     if force and not reason.strip():
         raise ValueError("force import requires an override reason")
 
-    manifest_path = batch_dir / "manifest.json"
-    manifest = load_manifest(manifest_path)
+    manifest_path, manifest = load_batch_manifest(batch_dir)
     batch_import_id = db.create_import_batch(
         batch_id=manifest.batch_id,
         manifest_path=str(manifest_path),
@@ -213,11 +224,11 @@ def import_manifest_batch(
         parser_version=manifest.parser_version,
     )
 
-    selected = set(selected_relpaths or [])
+    selected = None if selected_relpaths is None else set(selected_relpaths)
     records = [
         record
         for record in manifest.files
-        if not selected or record.source_relpath in selected
+        if selected is None or record.source_relpath in selected
     ]
 
     imported = 0
