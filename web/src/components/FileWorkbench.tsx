@@ -6,6 +6,7 @@ import {
   convertFile,
   enqueueJob,
   fetchFiles,
+  type ImportBatchResponse,
   parseFile,
   scanProfile,
   type Profile,
@@ -14,6 +15,7 @@ import {
 } from '../api';
 import { loadJson, saveJson } from '../storage';
 import { FileFilters, type FileFilterState } from './FileFilters';
+import { ImportBatchDialog } from './ImportBatchDialog';
 
 function fileName(path: string) {
   return path.split('/').pop() || path;
@@ -108,6 +110,7 @@ type FileWorkbenchProps = {
   profiles: Profile[];
   profilesError: string;
   profilesLoading: boolean;
+  initialImportBatchOpen?: boolean;
 };
 
 const defaultFilters: FileFilterState = {
@@ -135,7 +138,12 @@ export function isNearListEnd(metrics: {
   return metrics.scrollTop + metrics.clientHeight >= metrics.scrollHeight - SCROLL_LOAD_THRESHOLD;
 }
 
-export function FileWorkbench({ profiles, profilesError, profilesLoading }: FileWorkbenchProps) {
+export function FileWorkbench({
+  profiles,
+  profilesError,
+  profilesLoading,
+  initialImportBatchOpen = false,
+}: FileWorkbenchProps) {
   const [files, setFiles] = useState<SourceFile[]>([]);
   const [filters, setFilters] = useState<FileFilterState>(() =>
     loadJson('rag-sync.file-filters', defaultFilters),
@@ -146,6 +154,7 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [fileAction, setFileAction] = useState<'convert' | 'upload' | 'parse' | ''>('');
+  const [importBatchOpen, setImportBatchOpen] = useState(initialImportBatchOpen);
   const [error, setError] = useState('');
 
   async function reload() {
@@ -380,6 +389,11 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
     }
   }
 
+  async function handleBatchImported(_: ImportBatchResponse) {
+    await reload();
+    setImportBatchOpen(false);
+  }
+
   return (
     <div className="workbench">
       <div className="workbench-toolbar">
@@ -431,6 +445,13 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
                 disabled={selectedCount === 0}
               >
                 Clear selection
+              </button>
+              <button
+                className="action-button"
+                type="button"
+                onClick={() => setImportBatchOpen(true)}
+              >
+                Import batch
               </button>
               <button
                 className="action-button primary"
@@ -700,6 +721,12 @@ export function FileWorkbench({ profiles, profilesError, profilesLoading }: File
           )}
         </aside>
       </div>
+      {importBatchOpen ? (
+        <ImportBatchDialog
+          onClose={() => setImportBatchOpen(false)}
+          onImported={handleBatchImported}
+        />
+      ) : null}
     </div>
   );
 }

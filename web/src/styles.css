@@ -309,6 +309,157 @@ h1 {
   background: var(--surface-subtle);
 }
 
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(28 25 23 / 32%);
+  padding: 24px;
+}
+
+.dialog-shell {
+  display: grid;
+  width: min(1100px, 100%);
+  max-height: min(92vh, 900px);
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  padding: 18px;
+}
+
+.dialog-header,
+.dialog-section {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.dialog-header {
+  align-items: flex-start;
+}
+
+.dialog-section {
+  align-items: flex-end;
+}
+
+.dialog-section-compact {
+  align-items: center;
+}
+
+.dialog-section-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.dialog-field {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dialog-field span {
+  color: var(--muted);
+}
+
+.dialog-field input,
+.dialog-field textarea {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  padding: 9px 10px;
+  font: inherit;
+}
+
+.dialog-field textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.dialog-table-wrap {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.import-batch-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.import-batch-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.import-batch-card dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.import-batch-card dd {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.import-batch-table {
+  min-width: 860px;
+}
+
+.import-batch-file {
+  display: grid;
+  gap: 4px;
+}
+
+.state-pill {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.state-pill-ready {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.state-pill-warning {
+  border-color: var(--danger-border);
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.state-pill-blocked {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
 .workbench {
   display: grid;
   min-height: 0;
@@ -912,6 +1063,21 @@ h1 {
 
   .table-toolbar {
     align-items: stretch;
+  }
+
+  .dialog-backdrop {
+    padding: 12px;
+  }
+
+  .dialog-header,
+  .dialog-section {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dialog-shell {
+    max-height: 100%;
+    padding: 14px;
   }
 
   .file-details {

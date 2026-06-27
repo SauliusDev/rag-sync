@@ -1,7 +1,10 @@
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import {
   INITIAL_VISIBLE_ROWS,
+  FileWorkbench,
   buildConversionStage,
   buildRagflowStage,
   buildSelectionSummary,
@@ -12,6 +15,21 @@ import {
 describe('file workbench lazy rendering helpers', () => {
   it('starts with a fixed initial batch size', () => {
     expect(INITIAL_VISIBLE_ROWS).toBe(50);
+  });
+
+  it('exposes the import batch entrypoint and can render the dialog open', () => {
+    const markup = renderToStaticMarkup(
+      createElement(FileWorkbench, {
+        profiles: [],
+        profilesError: '',
+        profilesLoading: false,
+        initialImportBatchOpen: true,
+      }),
+    );
+
+    expect(markup).toContain('Import batch');
+    expect(markup).toContain('role="dialog"');
+    expect(markup).toContain('Batch directory');
   });
 
   it('grows visible rows in fixed batches without exceeding total rows', () => {

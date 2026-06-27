@@ -119,6 +119,70 @@ export type AppSettings = {
   profiles: Profile[];
 };
 
+export type ImportBatchValidationStatus =
+  | 'match'
+  | 'missing_source'
+  | 'hash_mismatch'
+  | 'missing_markdown'
+  | 'failed_remote_conversion';
+
+export type ImportBatchPreviewFile = {
+  source_relpath: string;
+  source_filename: string;
+  markdown_relpath: string;
+  status: string;
+  validation_status: ImportBatchValidationStatus;
+  local_source_sha256: string | null;
+  manifest_source_sha256: string;
+};
+
+export type ImportBatchPreviewResponse = {
+  batch_id: string;
+  profile: string;
+  parser: string;
+  parser_version: string;
+  files: ImportBatchPreviewFile[];
+  summary: {
+    total: number;
+    importable: number;
+    match: number;
+    missing_source: number;
+    hash_mismatch: number;
+    missing_markdown: number;
+    failed_remote_conversion: number;
+  };
+};
+
+export type ImportBatchPreviewRequest = {
+  batch_dir: string;
+  selected_relpaths?: string[] | null;
+};
+
+export type ImportBatchRequest = {
+  batch_dir: string;
+  force?: boolean;
+  reason?: string;
+  selected_relpaths?: string[] | null;
+};
+
+export type ImportBatchResponse = {
+  batch_id: string;
+  files: number;
+  imported: number;
+};
+
+async function readErrorDetail(response: Response, fallback: string) {
+  try {
+    const payload = (await response.json()) as { detail?: string };
+    if (typeof payload.detail === 'string' && payload.detail.trim()) {
+      return payload.detail;
+    }
+  } catch {
+    // Ignore non-JSON error bodies.
+  }
+  return `${fallback}: ${response.status}`;
+}
+
 export async function fetchProfiles(): Promise<Profile[]> {
   const response = await fetch('/api/profiles');
   if (!response.ok) {
@@ -306,4 +370,30 @@ export async function fetchQuerySet(name: string): Promise<RetrievalQuery[]> {
 
   const data = (await response.json()) as { queries?: RetrievalQuery[] };
   return data.queries ?? [];
+}
+
+export async function previewImportBatch(
+  request: ImportBatchPreviewRequest,
+): Promise<ImportBatchPreviewResponse> {
+  const response = await fetch('/api/import-batches/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    throw new Error(await readErrorDetail(response, 'Failed to preview import batch'));
+  }
+  return (await response.json()) as ImportBatchPreviewResponse;
+}
+
+export async function importBatch(request: ImportBatchRequest): Promise<ImportBatchResponse> {
+  const response = await fetch('/api/import-batches/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    throw new Error(await readErrorDetail(response, 'Failed to import batch'));
+  }
+  return (await response.json()) as ImportBatchResponse;
 }
