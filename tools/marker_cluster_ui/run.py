@@ -9,6 +9,8 @@ from rich.panel import Panel
 
 from rag_sync.marker_batch import BatchRunResult, run_batch
 
+CLI_RUNTIME_ERROR_EXIT_CODE = 2
+
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -59,13 +61,17 @@ def main(argv: Sequence[str] | None = None, *, console: Console | None = None) -
     console.print(
         f"[bold]Marker batch[/bold] input={args.input_dir} output={args.output_dir} profile={args.profile}"
     )
-    result = run_batch(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        profile=args.profile,
-        tags=tuple(args.tag),
-        marker_bin=args.marker_bin,
-    )
+    try:
+        result = run_batch(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            profile=args.profile,
+            tags=tuple(args.tag),
+            marker_bin=args.marker_bin,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        console.print(f"[bold red]Marker batch failed:[/bold red] {exc}")
+        return CLI_RUNTIME_ERROR_EXIT_CODE
     render_summary(console, result)
     return 0 if result.failure_count == 0 else 1
 

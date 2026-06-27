@@ -41,4 +41,11 @@ The runner writes batch artifacts under `--output-dir` using the existing batch 
 - `logs/run.jsonl`
 - generated Markdown files under `outputs/`
 
-Exit code is `0` when all files convert successfully, otherwise `1`.
+## Exit behavior
+
+- `0`: the batch finished and `failure_count == 0`
+- `1`: the batch finished but one or more files failed conversion, so `failure_count > 0`
+- `2`: CLI usage error from `argparse` such as missing required flags
+- `2`: controlled runtime/setup failure before a batch result is produced, for example an invalid input directory, no PDFs found, or a local Marker setup problem surfaced by `run_batch(...)`
+
+For controlled runtime/setup failures, the runner prints a concise Rich error line instead of an uncaught traceback.

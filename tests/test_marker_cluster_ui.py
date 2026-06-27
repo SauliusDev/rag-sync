@@ -6,7 +6,7 @@ import pytest
 from rich.console import Console
 
 from rag_sync.marker_batch import BatchRunResult
-from tools.marker_cluster_ui.run import main
+from tools.marker_cluster_ui.run import main, parse_args
 
 
 def test_cluster_ui_runner_prints_summary(
@@ -103,3 +103,43 @@ def test_cluster_ui_runner_returns_nonzero_when_batch_has_failures(
     assert exit_code == 1
     assert "failure_count" in output
     assert "1" in output
+
+
+def test_cluster_ui_runner_handles_runtime_validation_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "Broken.pdf").write_bytes(b"%PDF-1.4\n")
+    console = Console(record=True, width=120)
+
+    def fake_run_batch(**_: object) -> BatchRunResult:
+        raise ValueError("input directory contains no PDF files")
+
+    monkeypatch.setattr("tools.marker_cluster_ui.run.run_batch", fake_run_batch)
+
+    exit_code = main(
+        [
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(tmp_path / "batch"),
+            "--profile",
+            "quant-books",
+        ],
+        console=console,
+    )
+
+    output = console.export_text()
+
+    assert exit_code == 2
+    assert "Marker batch failed" in output
+    assert "contains no PDF files" in output
+
+
+def test_cluster_ui_parse_args_uses_argparse_exit_code_for_usage_errors() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args([])
+
+    assert exc_info.value.code == 2
