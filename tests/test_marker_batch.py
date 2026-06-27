@@ -223,6 +223,11 @@ def test_run_marker_for_file_enforces_timeout_and_cleans_up_process(
     pdf_path.write_bytes(b"%PDF-1.4\n")
     killed: list[tuple[int, int]] = []
 
+    monkeypatch.setattr(
+        "rag_sync.marker_batch.pdf_metadata",
+        lambda path: {"pdf_producer": "Test Producer", "page_count": 1},
+    )
+
     class FakeProc:
         pid = 123
         returncode = None

@@ -110,3 +110,13 @@ def test_quality_clean_for_valid_markdown(project_tmp: Path):
 
     assert result.status == "clean"
     assert result.warnings == []
+
+
+def test_quality_blocks_implausibly_small_math_heavy_multipage_output(project_tmp: Path):
+    path = project_tmp / "cover-only.md"
+    path.write_text("Title\n\n$x$\n", encoding="utf-8")
+
+    result = check_markdown_quality(path, math_heavy=True, page_count=23)
+
+    assert result.status == "blocked"
+    assert any("implausibly small" in warning for warning in result.warnings)

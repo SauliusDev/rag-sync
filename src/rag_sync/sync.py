@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 from hashlib import sha256
 from pathlib import Path
@@ -94,11 +95,16 @@ def _convert_with_parser(
         output_path=str(output_path),
     )
     try:
+        convert_kwargs = {
+            "source_path": source_path,
+            "output_path": output_path,
+            "source_type": str(row["source_type"]),
+            "sha256": str(row["sha256"]),
+        }
+        if "pdf_producer" in inspect.signature(parser.convert).parameters:
+            convert_kwargs["pdf_producer"] = str(row.get("pdf_producer", ""))
         result = parser.convert(
-            source_path=source_path,
-            output_path=output_path,
-            source_type=str(row["source_type"]),
-            sha256=str(row["sha256"]),
+            **convert_kwargs,
         )
     except Exception as exc:
         log_event(
@@ -115,7 +121,11 @@ def _convert_with_parser(
         )
         raise
     math_heavy = str(row["source_type"]).lower() in {"book", "paper"}
-    quality = check_markdown_quality(result.output_path, math_heavy=math_heavy)
+    quality = check_markdown_quality(
+        result.output_path,
+        math_heavy=math_heavy,
+        page_count=int(row["page_count"]) if row.get("page_count") is not None else None,
+    )
     output_bytes = result.output_path.stat().st_size if result.output_path.exists() else 0
     log_event(
         "conversion.quality.checked",

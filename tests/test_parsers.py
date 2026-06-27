@@ -47,6 +47,138 @@ def test_build_marker_command_uses_output_parent(project_tmp: Path):
     assert str(source) in cmd
     assert "--output_dir" in cmd
     assert str(output.parent) in cmd
+    assert "--disable_ocr" in cmd
+
+
+def test_build_marker_command_can_leave_ocr_enabled(project_tmp: Path):
+    source = project_tmp / "marker-input"
+    output = project_tmp / "out" / "book.md"
+
+    cmd = build_marker_command(source, output, disable_ocr=False)
+
+    assert "--disable_ocr" not in cmd
+    assert "--disable_multiprocessing" in cmd
+    assert "--recognition_batch_size" in cmd
+    assert "ocr_without_boxes" in cmd
+    assert "--drop_repeated_text" in cmd
+
+
+def test_marker_parser_enables_ocr_when_pdf_has_no_extractable_text(
+    monkeypatch: pytest.MonkeyPatch, project_tmp: Path
+):
+    source = project_tmp / "book.pdf"
+    source.write_bytes(b"pdf")
+    output = project_tmp / "out" / "book.md"
+
+    def fake_run(cmd: list[str], **kwargs: object):
+        assert "--disable_ocr" not in cmd
+        output_dir = Path(cmd[cmd.index("--output_dir") + 1])
+        return _fake_completed_process(output_dir, ["book.md"], body="ocr marker body")
+
+    monkeypatch.setattr(parsers, "_run_parser_command", lambda cmd, **kwargs: fake_run(cmd, **kwargs))
+    monkeypatch.setattr(parsers, "_should_disable_marker_ocr_for_pdf", lambda **kwargs: False)
+
+    result = MarkerParser().convert(source, output, "book", "abc")
+
+    assert result.output_path == output
+    assert "ocr marker body" in output.read_text(encoding="utf-8")
+
+
+def test_should_disable_marker_ocr_for_pdf_detects_extractable_text(
+    monkeypatch: pytest.MonkeyPatch, project_tmp: Path
+):
+    source = project_tmp / "book.pdf"
+    source.write_bytes(b"pdf")
+
+    class FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class FakeReader:
+        def __init__(self, path: Path):
+            assert path == source
+            self.pages = [FakePage("hello world " * 8)]
+
+    monkeypatch.setattr(parsers, "PdfReader", FakeReader)
+
+    assert parsers._should_disable_marker_ocr_for_pdf(source_path=source, pdf_producer="") is True
+
+
+def test_should_disable_marker_ocr_for_pdf_keeps_ocr_for_image_pdf(
+    monkeypatch: pytest.MonkeyPatch, project_tmp: Path
+):
+    source = project_tmp / "book.pdf"
+    source.write_bytes(b"pdf")
+
+    class FakePage:
+        def extract_text(self) -> str:
+            return ""
+
+    class FakeReader:
+        def __init__(self, path: Path):
+            assert path == source
+            self.pages = [FakePage()]
+
+    monkeypatch.setattr(parsers, "PdfReader", FakeReader)
+
+    assert (
+        parsers._should_disable_marker_ocr_for_pdf(
+            source_path=source,
+            pdf_producer="CVISION Technologies' PDFCompressor 2.0",
+        )
+        is False
+    )
+
+
+def test_should_disable_marker_ocr_for_pdf_keeps_ocr_for_text_cover_image_body(
+    monkeypatch: pytest.MonkeyPatch, project_tmp: Path
+):
+    source = project_tmp / "jstor.pdf"
+    source.write_bytes(b"pdf")
+
+    class FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class FakeReader:
+        def __init__(self, path: Path):
+            assert path == source
+            self.pages = [FakePage("Continuous Auctions and Insider Trading " * 2)]
+            self.pages.extend(FakePage("") for _ in range(22))
+
+    monkeypatch.setattr(parsers, "PdfReader", FakeReader)
+
+    assert parsers._should_disable_marker_ocr_for_pdf(source_path=source, pdf_producer="") is False
+
+
+def test_should_disable_marker_ocr_for_pdf_keeps_ocr_for_repeated_banner_text(
+    monkeypatch: pytest.MonkeyPatch, project_tmp: Path
+):
+    source = project_tmp / "heston.pdf"
+    source.write_bytes(b"pdf")
+    repeated = "at Univ of Wisconsin-Madison General Library System on September 27, 2012 http://"
+
+    class FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class FakeReader:
+        def __init__(self, path: Path):
+            assert path == source
+            self.pages = [FakePage(repeated) for _ in range(17)]
+
+    monkeypatch.setattr(parsers, "PdfReader", FakeReader)
+
+    assert parsers._should_disable_marker_ocr_for_pdf(source_path=source, pdf_producer="") is False
 
 
 def test_marker_parser_preserves_original_source_and_ignores_stale_output(

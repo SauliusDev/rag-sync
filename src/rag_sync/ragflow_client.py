@@ -35,7 +35,6 @@ def parser_config(
         "delimiter": "\n",
         "html4excel": False,
         "layout_recognize": "DeepDOC",
-        "llm_id": "",
         "topn_tags": 3,
         "filename_embd_weight": 0.1,
         "parent_child": {

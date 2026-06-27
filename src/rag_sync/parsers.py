@@ -5,9 +5,13 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from threading import Lock
+
+from pypdf import PdfReader
 
 from rag_sync.artifacts import make_upload_markdown, make_upload_markdown_from_text
 from rag_sync.ldd import log_event
@@ -16,6 +20,12 @@ MARKER_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/marker/bin/marker"
 MINERU_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/mineru/bin/mineru"
 MARKER_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "1200"))
 MINERU_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MINERU_TIMEOUT_SECONDS", "1200"))
+MARKER_LOW_MEMORY_OCR = os.environ.get("RAG_SYNC_MARKER_LOW_MEMORY_OCR", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 _active_parser_procs: set[subprocess.Popen[str]] = set()
 _active_parser_procs_lock = Lock()
 
@@ -37,6 +47,7 @@ class PassthroughParser:
         output_path: Path,
         source_type: str,
         sha256: str,
+        pdf_producer: str = "",
     ) -> ParserResult:
         make_upload_markdown(source_path, output_path, source_type, self.name, sha256)
         return ParserResult(self.name, output_path, "", "")
@@ -205,20 +216,115 @@ def _run_parser_command(
     )
 
 
-def build_marker_command(source_path: Path, output_path: Path) -> list[str]:
+def _should_disable_marker_ocr_for_pdf(source_path: Path, pdf_producer: str = "") -> bool:
+    producer = pdf_producer.strip().lower()
+    likely_scanned = "pdfcompressor" in producer or "scan" in producer or "ocr" in producer
+    try:
+        reader = PdfReader(source_path)
+        page_count = len(reader.pages)
+        sample_indices = sorted(
+            {
+                0,
+                1,
+                2,
+                max(page_count // 2, 0),
+                max(page_count - 3, 0),
+                max(page_count - 2, 0),
+                max(page_count - 1, 0),
+            }
+        )
+        sampled = 0
+        text_pages = 0
+        blank_pages = 0
+        normalized_samples: list[str] = []
+        for index in sample_indices:
+            if index >= page_count:
+                continue
+            sampled += 1
+            page = reader.pages[index]
+            text = page.extract_text() or ""
+            stripped = text.strip()
+            if len(stripped) >= 30:
+                text_pages += 1
+                normalized_samples.append(re.sub(r"\s+", " ", stripped).lower()[:240])
+            else:
+                blank_pages += 1
+    except Exception:
+        log_event(
+            "marker.ocr_decision.failed",
+            "error",
+            parser="marker",
+            source_path=str(source_path),
+            pdf_producer=pdf_producer,
+            likely_scanned=likely_scanned,
+        )
+        return not likely_scanned
+    repeated_text_pages = 0
+    if normalized_samples:
+        dominant_sample, dominant_count = Counter(normalized_samples).most_common(1)[0]
+        if dominant_count >= max(3, sampled - 1):
+            repeated_text_pages = dominant_count
+    effective_text_pages = text_pages - repeated_text_pages
+    disable_ocr = effective_text_pages > 0 and effective_text_pages >= blank_pages
+    log_event(
+        "marker.ocr_decision.finished",
+        "ok",
+        parser="marker",
+        source_path=str(source_path),
+        pdf_producer=pdf_producer,
+        page_count=page_count,
+        sampled_pages=sampled,
+        text_pages=text_pages,
+        effective_text_pages=effective_text_pages,
+        blank_pages=blank_pages,
+        repeated_text_pages=repeated_text_pages,
+        disable_ocr=disable_ocr,
+    )
+    return disable_ocr
+
+
+def build_marker_command(
+    source_path: Path,
+    output_path: Path,
+    *,
+    disable_ocr: bool = True,
+) -> list[str]:
     marker_bin = MARKER_BIN if Path(MARKER_BIN).exists() else shutil.which("marker") or "marker"
-    return [
+    command = [
         marker_bin,
         str(source_path),
         "--output_dir",
         str(output_path.parent),
         "--output_format",
         "markdown",
-        "--disable_ocr",
         "--disable_image_extraction",
         "--workers",
         "1",
     ]
+    if disable_ocr:
+        command.insert(6, "--disable_ocr")
+    elif MARKER_LOW_MEMORY_OCR:
+        command.extend(
+            [
+                "--disable_multiprocessing",
+                "--lowres_image_dpi",
+                "72",
+                "--highres_image_dpi",
+                "96",
+                "--layout_batch_size",
+                "1",
+                "--detection_batch_size",
+                "1",
+                "--recognition_batch_size",
+                "1",
+                "--ocr_error_batch_size",
+                "1",
+                "--ocr_task_name",
+                "ocr_without_boxes",
+                "--drop_repeated_text",
+            ]
+        )
+    return command
 
 
 class MarkerParser:
@@ -230,6 +336,7 @@ class MarkerParser:
         output_path: Path,
         source_type: str,
         sha256: str,
+        pdf_producer: str = "",
     ) -> ParserResult:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         raw_dir = _prepare_raw_output_dir(output_path, self.name)
@@ -237,7 +344,13 @@ class MarkerParser:
         input_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, input_dir / source_path.name)
         raw_output_path = raw_dir / output_path.name
-        cmd = build_marker_command(input_dir, raw_output_path)
+        disable_ocr = True
+        if source_path.suffix.lower() == ".pdf":
+            disable_ocr = _should_disable_marker_ocr_for_pdf(
+                source_path=source_path,
+                pdf_producer=pdf_producer,
+            )
+        cmd = build_marker_command(input_dir, raw_output_path, disable_ocr=disable_ocr)
         proc = _run_parser_command(
             cmd,
             parser_name=self.name,
@@ -255,7 +368,20 @@ class MarkerParser:
                 stderr_tail=proc.stderr[-1000:],
             )
             raise RuntimeError(f"marker failed for {source_path}: {proc.stderr[-1000:]}")
-        raw = _single_markdown_output(raw_dir, self.name, source_path)
+        try:
+            raw = _single_markdown_output(raw_dir, self.name, source_path)
+        except RuntimeError:
+            log_event(
+                "parser.failed",
+                "error",
+                parser=self.name,
+                source_path=str(source_path),
+                output_path=str(output_path),
+                raw_dir=str(raw_dir),
+                returncode=proc.returncode,
+                stderr_tail=proc.stderr[-2000:],
+            )
+            raise
         _wrap_parser_output(raw, source_path, output_path, source_type, self.name, sha256)
         return ParserResult(self.name, output_path, proc.stdout, proc.stderr)
 
@@ -269,6 +395,7 @@ class MinerUParser:
         output_path: Path,
         source_type: str,
         sha256: str,
+        pdf_producer: str = "",
     ) -> ParserResult:
         mineru_bin = MINERU_BIN if Path(MINERU_BIN).exists() else shutil.which("mineru") or "mineru"
         output_path.parent.mkdir(parents=True, exist_ok=True)

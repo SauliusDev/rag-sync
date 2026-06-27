@@ -51,7 +51,7 @@ def test_parser_config_places_ragflow_extension_fields_under_ext():
     assert "toc_extraction" not in config
     assert "table_context_size" not in config
     assert "image_context_size" not in config
-    assert config["llm_id"] == ""
+    assert "llm_id" not in config
     assert config["ext"] == {
         "toc_extraction": True,
         "table_context_size": 0,

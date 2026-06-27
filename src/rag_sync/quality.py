@@ -22,7 +22,11 @@ def _body_without_frontmatter(text: str) -> str:
     return body
 
 
-def check_markdown_quality(path: Path, math_heavy: bool) -> QualityResult:
+def check_markdown_quality(
+    path: Path,
+    math_heavy: bool,
+    page_count: int | None = None,
+) -> QualityResult:
     text = path.read_text(encoding="utf-8", errors="replace")
     body = _body_without_frontmatter(text)
     warnings: list[str] = []
@@ -34,5 +38,15 @@ def check_markdown_quality(path: Path, math_heavy: bool) -> QualityResult:
         warnings.append("formula placeholder detected")
     if math_heavy and "$" not in body and "\\[" not in body:
         warnings.append("no obvious equations detected in math-heavy profile")
+    body_bytes = len(body.encode("utf-8"))
+    word_count = len(body.split())
+    if math_heavy and page_count is not None and page_count >= 10:
+        bytes_per_page = body_bytes / page_count
+        words_per_page = word_count / page_count
+        if body_bytes < 12_000 or (page_count >= 30 and bytes_per_page < 800 and words_per_page < 100):
+            warnings.append(
+                "implausibly small markdown for multi-page math-heavy source"
+            )
+            return QualityResult(status="blocked", warnings=warnings)
     status = "warning" if warnings else "clean"
     return QualityResult(status=status, warnings=warnings)
