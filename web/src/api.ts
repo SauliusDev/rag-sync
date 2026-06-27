@@ -1,5 +1,7 @@
 export { loadJson, saveJson } from './storage';
 
+const noStore = { cache: 'no-store' } as const;
+
 export type Profile = {
   name: string;
   parser_mode: string;
@@ -55,6 +57,20 @@ export type QueueStatus = {
     completed?: number;
     paused?: boolean;
   };
+  queue_eta?: {
+    seconds?: number | null;
+    label: string;
+    confidence: string;
+    throughput_label: string;
+    estimated_finish_at?: string | null;
+  };
+  eta?: {
+    seconds?: number | null;
+    label: string;
+    confidence: string;
+    throughput_label: string;
+    estimated_finish_at?: string | null;
+  };
   active?: JobRecord | null;
   system?: Record<string, SystemMetric>;
 };
@@ -81,6 +97,13 @@ export type JobRecord = {
   source_type?: string;
   queue_position?: number;
   stage?: JobStage;
+  eta_seconds?: number | null;
+  eta_label?: string;
+  wait_seconds?: number | null;
+  wait_label?: string;
+  confidence?: string;
+  timing_basis?: string;
+  progress_percent?: number | null;
 };
 
 export type SystemMetric = {
@@ -184,7 +207,7 @@ async function readErrorDetail(response: Response, fallback: string) {
 }
 
 export async function fetchProfiles(): Promise<Profile[]> {
-  const response = await fetch('/api/profiles');
+  const response = await fetch('/api/profiles', noStore);
   if (!response.ok) {
     throw new Error(`Failed to fetch profiles: ${response.status}`);
   }
@@ -194,7 +217,7 @@ export async function fetchProfiles(): Promise<Profile[]> {
 }
 
 export async function fetchFiles(): Promise<SourceFile[]> {
-  const response = await fetch('/api/files');
+  const response = await fetch('/api/files', noStore);
   if (!response.ok) {
     throw new Error(`Failed to fetch files: ${response.status}`);
   }
@@ -204,7 +227,7 @@ export async function fetchFiles(): Promise<SourceFile[]> {
 }
 
 export async function fetchSettings(): Promise<AppSettings> {
-  const response = await fetch('/api/settings');
+  const response = await fetch('/api/settings', noStore);
   if (!response.ok) {
     throw new Error(`Failed to fetch settings: ${response.status}`);
   }
@@ -213,7 +236,7 @@ export async function fetchSettings(): Promise<AppSettings> {
 }
 
 export async function fetchStatus(): Promise<QueueStatus> {
-  const response = await fetch('/api/status');
+  const response = await fetch('/api/status', noStore);
   if (!response.ok) {
     throw new Error(`Failed to fetch status: ${response.status}`);
   }
@@ -221,7 +244,7 @@ export async function fetchStatus(): Promise<QueueStatus> {
 }
 
 export async function fetchJobs(): Promise<JobRecord[]> {
-  const response = await fetch('/api/jobs');
+  const response = await fetch('/api/jobs', noStore);
   if (!response.ok) {
     throw new Error(`Failed to fetch jobs: ${response.status}`);
   }

@@ -135,10 +135,18 @@ describe('files API', () => {
 
   it('fetches queue status', async () => {
     const originalFetch = globalThis.fetch;
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = async () =>
       new Response(JSON.stringify({ label: '1 active · 2 queued', queue: {} }), {
         status: 200,
       });
+
+    globalThis.fetch = async (input, init) => {
+      calls.push([input, init]);
+      return new Response(JSON.stringify({ label: '1 active · 2 queued', queue: {} }), {
+        status: 200,
+      });
+    };
 
     try {
       await expect(fetchStatus()).resolves.toMatchObject({
@@ -147,6 +155,8 @@ describe('files API', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+
+    expect(calls).toEqual([['/api/status', { cache: 'no-store' }]]);
   });
 
   it('posts queue pause and resume requests', async () => {
@@ -196,16 +206,21 @@ describe('files API', () => {
 
   it('fetches jobs', async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
-      new Response(JSON.stringify({ jobs: [{ id: 9, status: 'running', progress: 0.35 }] }), {
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = async (input, init) => {
+      calls.push([input, init]);
+      return new Response(JSON.stringify({ jobs: [{ id: 9, status: 'running', progress: 0.35 }] }), {
         status: 200,
       });
+    };
 
     try {
       await expect(fetchJobs()).resolves.toEqual([{ id: 9, status: 'running', progress: 0.35 }]);
     } finally {
       globalThis.fetch = originalFetch;
     }
+
+    expect(calls).toEqual([['/api/jobs', { cache: 'no-store' }]]);
   });
 
   it('posts scan requests for a profile', async () => {

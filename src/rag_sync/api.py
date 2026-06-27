@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import subprocess
+import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -13,10 +17,18 @@ from pydantic import BaseModel
 from rag_sync.config import DEFAULT_PROFILE_PATH, DEFAULT_RAGFLOW_BASE_URL, load_profiles
 from rag_sync.db import RagSyncDb
 from rag_sync.import_manifest import import_manifest_batch, preview_manifest_batch
+from rag_sync.ldd import log_event
+from rag_sync.history import (
+    estimate_job_timing,
+    estimate_queue_timing,
+    format_eta_seconds,
+    prepare_timing_context,
+)
 from rag_sync.models import JobKind, Profile
 from rag_sync.parsers import terminate_active_parser_processes
-from rag_sync.queue import PersistentJobQueue
+from rag_sync.queue import JobCanceledError, PersistentJobQueue
 from rag_sync.ragflow_client import PROTECTED_DATASETS, QUANT_DATASET_DEFAULTS, RagFlowClient
+from rag_sync.scanner import backfill_pdf_metadata
 from rag_sync.sync import (
     convert_source_file,
     default_db,
@@ -26,6 +38,8 @@ from rag_sync.sync import (
     restart_ragflow_document,
     upload_latest_artifact,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ConvertRequest(BaseModel):
@@ -118,21 +132,49 @@ def infer_job_stage(
 
 
 def enrich_jobs(
+    db: RagSyncDb,
     jobs: list[dict[str, object]],
     files: list[dict[str, object]],
+    runtime_active_job: dict[str, object] | None = None,
+    timing_context: dict[str, object] | None = None,
+    now: datetime | None = None,
 ) -> list[dict[str, object]]:
+    job_rows = [dict(job) for job in jobs]
+    runtime_active_id = (
+        int(runtime_active_job["id"])
+        if isinstance(runtime_active_job, dict) and runtime_active_job.get("id") is not None
+        else None
+    )
+    if runtime_active_id is not None:
+        matched = False
+        for job in job_rows:
+            if int(job["id"]) != runtime_active_id:
+                continue
+            job["status"] = "running"
+            matched = True
+            break
+        if not matched:
+            active_copy = dict(runtime_active_job)
+            active_copy["status"] = "running"
+            job_rows.append(active_copy)
+
     files_by_id = {int(row["id"]): row for row in files}
     queued_positions = {
         int(job["id"]): index + 1
         for index, job in enumerate(
             sorted(
-                (job for job in jobs if str(job.get("status")) == "queued"),
+                (
+                    job
+                    for job in job_rows
+                    if str(job.get("status")) == "queued"
+                    and (runtime_active_id is None or int(job["id"]) != runtime_active_id)
+                ),
                 key=lambda row: int(row["id"]),
             )
         )
     }
     enriched: list[dict[str, object]] = []
-    for job in jobs:
+    for job in job_rows:
         source_file_id = job.get("source_file_id")
         file_row = files_by_id.get(int(source_file_id)) if source_file_id is not None else None
         source_path = str(file_row.get("source_path", "")) if isinstance(file_row, dict) else ""
@@ -161,7 +203,128 @@ def enrich_jobs(
         finished_at = str(job.get("finished_at") or "")
         return (rank, f"~{finished_at}", -int(job["id"]))
 
-    return sorted(enriched, key=job_sort_key)
+    sorted_jobs = sorted(enriched, key=job_sort_key)
+    wait_seconds_total = 0
+    wait_is_known = True
+    for job in sorted_jobs:
+        status = str(job.get("status", ""))
+        if status not in {"running", "queued"}:
+            job["eta_seconds"] = None
+            job["eta_label"] = "unknown"
+            job["wait_seconds"] = None
+            job["wait_label"] = "unknown"
+            job["confidence"] = "estimating"
+            job["timing_basis"] = "unknown"
+            continue
+
+        if status == "running":
+            job["wait_seconds"] = 0
+            job["wait_label"] = format_eta_seconds(0)
+        else:
+            wait_seconds = wait_seconds_total if wait_is_known else None
+            job["wait_seconds"] = wait_seconds
+            job["wait_label"] = format_eta_seconds(wait_seconds)
+
+        source_file_id = job.get("source_file_id")
+        source_row = files_by_id.get(int(source_file_id)) if source_file_id is not None else None
+        if source_row is None:
+            estimate = {
+                "eta_seconds": None,
+                "eta_label": "unknown",
+                "confidence": "estimating",
+                "timing_basis": "unknown",
+            }
+        else:
+            estimate = estimate_job_timing(
+                db,
+                job,
+                source_row,
+                now=now,
+                timing_context=timing_context,
+            )
+        job.update(estimate)
+
+        eta_seconds = estimate["eta_seconds"]
+        if eta_seconds is None:
+            wait_is_known = False
+        else:
+            wait_seconds_total += int(eta_seconds)
+
+    return sorted_jobs
+
+
+def current_job_rows(jobs: list[dict[str, object]]) -> list[dict[str, object]]:
+    active_or_queued: list[dict[str, object]] = []
+    latest_terminal_by_source: dict[tuple[object, object], dict[str, object]] = {}
+    latest_terminal_without_source: dict[tuple[object, object], dict[str, object]] = {}
+    active_sources: set[object] = set()
+
+    for job in jobs:
+        status = str(job.get("status", ""))
+        source_file_id = job.get("source_file_id")
+        if status in {"queued", "running"}:
+            active_or_queued.append(job)
+            if source_file_id is not None:
+                active_sources.add(source_file_id)
+            continue
+        if status not in {"completed", "failed", "canceled"}:
+            continue
+        if source_file_id is not None:
+            key = ("source", source_file_id)
+            existing = latest_terminal_by_source.get(key)
+            if existing is None or int(job["id"]) > int(existing["id"]):
+                latest_terminal_by_source[key] = job
+            continue
+        key = (job.get("kind"), job.get("profile_name"))
+        existing = latest_terminal_without_source.get(key)
+        if existing is None or int(job["id"]) > int(existing["id"]):
+            latest_terminal_without_source[key] = job
+
+    terminal_jobs = [
+        job
+        for (_, source_file_id), job in latest_terminal_by_source.items()
+        if source_file_id not in active_sources
+    ]
+    terminal_jobs.extend(latest_terminal_without_source.values())
+    return active_or_queued + terminal_jobs
+
+
+def hide_resolved_failed_jobs(
+    jobs: list[dict[str, object]],
+    files_by_id: dict[int, dict[str, object]],
+) -> list[dict[str, object]]:
+    visible: list[dict[str, object]] = []
+    for job in jobs:
+        if str(job.get("status")) not in {"failed", "canceled"}:
+            visible.append(job)
+            continue
+        source_file_id = job.get("source_file_id")
+        source_row = files_by_id.get(int(source_file_id)) if source_file_id is not None else None
+        if source_row is not None and str(source_row.get("state")) == "parsed":
+            continue
+        visible.append(job)
+    return visible
+
+
+def runtime_active_job_payload(
+    queue: PersistentJobQueue | None,
+    jobs: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if queue is None or queue.current_job is None or queue.current_job_id is None:
+        return None
+    runtime_job = dict(queue.current_job)
+    runtime_job["id"] = int(queue.current_job_id)
+    runtime_job["status"] = "running"
+    persisted = next(
+        (job for job in jobs if int(job["id"]) == int(queue.current_job_id)),
+        None,
+    )
+    if persisted is not None:
+        merged = dict(persisted)
+        merged.update(runtime_job)
+        merged["status"] = "running"
+        return merged
+    return runtime_job
 
 
 def _read_meminfo() -> tuple[int, int] | None:
@@ -299,6 +462,42 @@ def create_app(
 ) -> FastAPI:
     db = db_factory()
 
+    async def worker_loop(queue: PersistentJobQueue, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                ran_job = await queue.run_next()
+            except Exception:
+                logger.exception("RAG Sync worker iteration failed; continuing")
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=worker_poll_interval)
+                except TimeoutError:
+                    continue
+                continue
+            if ran_job:
+                continue
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=worker_poll_interval)
+            except TimeoutError:
+                continue
+
+    def ensure_worker_task_running(app_instance: FastAPI) -> bool:
+        if not worker_enabled:
+            return False
+        if not bool(getattr(app_instance.state, "worker_lock_acquired", False)):
+            return False
+        queue = getattr(app_instance.state, "queue", None)
+        if queue is None:
+            return False
+        existing_task = getattr(app_instance.state, "worker_task", None)
+        if existing_task is not None and not existing_task.done():
+            return False
+        stop_event = getattr(app_instance.state, "worker_stop_event", None)
+        if stop_event is None or stop_event.is_set():
+            stop_event = asyncio.Event()
+            app_instance.state.worker_stop_event = stop_event
+        app_instance.state.worker_task = asyncio.create_task(worker_loop(queue, stop_event))
+        return True
+
     def load_configured_profiles() -> list[Profile]:
         try:
             return profile_loader(profile_path)
@@ -340,39 +539,252 @@ def create_app(
         return response
 
     def register_queue_handlers(queue: PersistentJobQueue) -> None:
+        configured_profiles_cache: dict[str, Profile] | None = None
+
+        def configured_profiles_by_name() -> dict[str, Profile]:
+            nonlocal configured_profiles_cache
+            if configured_profiles_cache is None:
+                configured_profiles_cache = {
+                    profile.name: profile for profile in load_configured_profiles()
+                }
+            return configured_profiles_cache
+
+        def stage_snapshot(source_file_id: int, parser_name: str) -> str:
+            source_row = next(
+                (
+                    row
+                    for row in db.list_source_files()
+                    if int(row["id"]) == source_file_id
+                ),
+                None,
+            )
+            if source_row is None:
+                return "{}"
+            return json.dumps(
+                {
+                    "profile_name": str(source_row.get("profile_name", "")),
+                    "source_type": str(source_row.get("source_type", "")),
+                    "extension": str(source_row.get("extension", "")),
+                    "size_bytes": int(source_row.get("size_bytes", 0) or 0),
+                    "page_count": source_row.get("page_count"),
+                    "pdf_producer": str(source_row.get("pdf_producer", "")),
+                    "parser": parser_name,
+                }
+            )
+
+        def latest_artifact_parser(source_file_id: int, fallback: str) -> str:
+            artifact = db.latest_artifact_for_source(source_file_id)
+            if artifact is not None and artifact.get("parser"):
+                return str(artifact["parser"])
+            return fallback
+
+        def latest_artifact(source_file_id: int) -> dict[str, object] | None:
+            artifact = db.latest_artifact_for_source(source_file_id)
+            return dict(artifact) if artifact is not None else None
+
+        def parser_name_for_job(job: dict[str, object]) -> str:
+            source_file_id = int(job["source_file_id"])
+            kind = str(job.get("kind") or "")
+            source_row = next(
+                (
+                    row
+                    for row in db.list_source_files()
+                    if int(row["id"]) == source_file_id
+                ),
+                None,
+            )
+            extension = str(source_row.get("extension", "")).lower() if source_row else ""
+            if extension == "md":
+                return "passthrough"
+            if kind in {JobKind.SYNC_FILE.value, JobKind.CONVERT.value}:
+                profile_name = str(source_row.get("profile_name") or "")
+                profile = configured_profiles_by_name().get(profile_name)
+                if profile is not None:
+                    return profile.parser_mode.value
+                return "marker"
+            profile_name = str(job.get("profile_name") or source_row.get("profile_name") or "")
+            profile = configured_profiles_by_name().get(profile_name)
+            artifact = db.latest_artifact_for_source(source_file_id)
+            if artifact is not None and artifact.get("parser"):
+                return str(artifact["parser"])
+            if profile is not None:
+                return profile.parser_mode.value
+            return "marker"
+
+        def job_canceled(job_id: int) -> bool:
+            return job_id in queue.cancel_requested_job_ids
+
+        async def run_tracked_stage(
+            *,
+            run_id: int,
+            job: dict[str, object],
+            stage: str,
+            parser_name: str,
+            operation: Callable[[], object | asyncio.Future],
+        ) -> tuple[object, str]:
+            source_file_id = int(job["source_file_id"])
+            artifact_before = latest_artifact(source_file_id)
+            started = time.monotonic()
+            try:
+                result = operation()
+                if asyncio.iscoroutine(result):
+                    result = await result
+            except Exception as exc:
+                canceled = job_canceled(int(job["id"]))
+                db.record_stage_event(
+                    run_id=run_id,
+                    job_id=int(job["id"]),
+                    source_file_id=source_file_id,
+                    stage=stage,
+                    status="canceled" if canceled else "failed",
+                    progress=0.0,
+                    progress_message=f"{stage} canceled" if canceled else f"{stage} failed",
+                    duration_seconds=time.monotonic() - started,
+                    error_summary="killed by user" if canceled else str(exc),
+                    data_json=stage_snapshot(source_file_id, parser_name),
+                )
+                raise
+            artifact_after = latest_artifact(source_file_id)
+            actual_parser_name = parser_name
+            if artifact_after is not None:
+                before_id = artifact_before.get("id") if artifact_before is not None else None
+                after_id = artifact_after.get("id")
+                if before_id != after_id and artifact_after.get("parser"):
+                    actual_parser_name = str(artifact_after["parser"])
+            db.update_pipeline_run_parser(run_id, actual_parser_name)
+            db.record_stage_event(
+                run_id=run_id,
+                job_id=int(job["id"]),
+                source_file_id=source_file_id,
+                stage=stage,
+                status="completed",
+                progress=1.0,
+                progress_message=f"{stage} completed",
+                duration_seconds=time.monotonic() - started,
+                error_summary="",
+                data_json=stage_snapshot(source_file_id, actual_parser_name),
+            )
+            return result, actual_parser_name
+
+        async def run_pipeline_job(
+            job: dict[str, object],
+            stages: list[tuple[str, Callable[[], object | asyncio.Future]]],
+        ) -> dict[str, object]:
+            source_file_id = int(job["source_file_id"])
+            parser_name = parser_name_for_job(job)
+            source_row = next(
+                (
+                    row
+                    for row in db.list_source_files()
+                    if int(row["id"]) == source_file_id
+                ),
+                None,
+            )
+            run_id = db.create_pipeline_run(
+                source_file_id,
+                (
+                    str(source_row.get("profile_name") or "")
+                    if str(job.get("kind") or "") in {JobKind.SYNC_FILE.value, JobKind.CONVERT.value}
+                    else str(job.get("profile_name") or source_row.get("profile_name") or "")
+                ),
+                str(source_row.get("source_type", "")) if source_row is not None else "",
+                parser_name,
+                str(job["kind"]),
+            )
+            current_parser_name = parser_name
+            try:
+                for stage_name, operation in stages:
+                    _, current_parser_name = await run_tracked_stage(
+                        run_id=run_id,
+                        job=job,
+                        stage=stage_name,
+                        parser_name=current_parser_name,
+                        operation=operation,
+                    )
+                    if job_canceled(int(job["id"])):
+                        raise JobCanceledError("killed by user")
+            except Exception as exc:
+                if job_canceled(int(job["id"])):
+                    db.finish_pipeline_run(run_id, "canceled", error_summary="killed by user")
+                else:
+                    db.finish_pipeline_run(run_id, "failed", error_summary=str(exc))
+                raise
+            if job_canceled(int(job["id"])):
+                db.finish_pipeline_run(run_id, "canceled", error_summary="killed by user")
+                raise JobCanceledError("killed by user")
+            db.finish_pipeline_run(run_id, "completed")
+            return {"ok": True}
+
         async def handle_sync_file(job: dict[str, object]) -> dict[str, object] | None:
             source_file_id = int(job["source_file_id"])
-            await asyncio.to_thread(
-                convert_source_file,
-                db,
-                source_file_id,
-                None,
-                profile_path,
+            return await run_pipeline_job(
+                job,
+                [
+                    (
+                        "convert",
+                        lambda: asyncio.to_thread(
+                            convert_source_file,
+                            db,
+                            source_file_id,
+                            None,
+                            profile_path,
+                        ),
+                    ),
+                    (
+                        "upload",
+                        lambda: upload_latest_artifact(
+                            db,
+                            source_file_id,
+                            profile_path=profile_path,
+                        ),
+                    ),
+                    (
+                        "parse",
+                        lambda: parse_uploaded_document(db, source_file_id),
+                    ),
+                ],
             )
-            await upload_latest_artifact(db, source_file_id, profile_path=profile_path)
-            await parse_uploaded_document(db, source_file_id)
-            return {"ok": True}
 
         async def handle_convert(job: dict[str, object]) -> dict[str, object] | None:
             source_file_id = int(job["source_file_id"])
-            await asyncio.to_thread(
-                convert_source_file,
-                db,
-                source_file_id,
-                None,
-                profile_path,
+            return await run_pipeline_job(
+                job,
+                [
+                    (
+                        "convert",
+                        lambda: asyncio.to_thread(
+                            convert_source_file,
+                            db,
+                            source_file_id,
+                            None,
+                            profile_path,
+                        ),
+                    )
+                ],
             )
-            return {"ok": True}
 
         async def handle_upload(job: dict[str, object]) -> dict[str, object] | None:
             source_file_id = int(job["source_file_id"])
-            await upload_latest_artifact(db, source_file_id, profile_path=profile_path)
-            return {"ok": True}
+            return await run_pipeline_job(
+                job,
+                [
+                    (
+                        "upload",
+                        lambda: upload_latest_artifact(
+                            db,
+                            source_file_id,
+                            profile_path=profile_path,
+                        ),
+                    )
+                ],
+            )
 
         async def handle_parse(job: dict[str, object]) -> dict[str, object] | None:
             source_file_id = int(job["source_file_id"])
-            await parse_uploaded_document(db, source_file_id)
-            return {"ok": True}
+            return await run_pipeline_job(
+                job,
+                [("parse", lambda: parse_uploaded_document(db, source_file_id))],
+            )
 
         async def handle_restart(job: dict[str, object]) -> dict[str, object] | None:
             source_file_id = int(job["source_file_id"])
@@ -403,34 +815,66 @@ def create_app(
         register_queue_handlers(queue)
         _app.state.queue = queue
         _app.state.profile_names = configured_profile_names()
-        db.requeue_running_jobs()
-        if _app.state.profile_names:
-            db.cancel_jobs_for_missing_profiles(_app.state.profile_names)
+        worker_owner = f"pid-{os.getpid()}-app-{id(_app)}"
+        _app.state.worker_lock_acquired = False
+        _app.state.worker_task = None
+        _app.state.worker_stop_event = None
+        log_event(
+            "app.lifecycle.started",
+            "ok",
+            pid=os.getpid(),
+            worker_enabled=worker_enabled,
+            worker_owner=worker_owner,
+            profile_count=len(_app.state.profile_names),
+        )
+
+        if db.acquire_worker_lock(worker_owner):
+            _app.state.worker_lock_acquired = True
+            backfill_pdf_metadata(db, profile_names=_app.state.profile_names)
+            db.requeue_running_jobs()
+            if _app.state.profile_names:
+                db.cancel_jobs_for_missing_profiles(_app.state.profile_names)
 
         if not worker_enabled:
-            yield
+            try:
+                yield
+            finally:
+                if _app.state.worker_lock_acquired:
+                    db.release_worker_lock(worker_owner)
             return
 
         stop_event = asyncio.Event()
-
-        async def worker_loop() -> None:
-            while not stop_event.is_set():
-                ran_job = await queue.run_next()
-                if ran_job:
-                    continue
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=worker_poll_interval)
-                except TimeoutError:
-                    continue
-
-        task = asyncio.create_task(worker_loop())
-        _app.state.worker_task = task
         _app.state.worker_stop_event = stop_event
+        if _app.state.worker_lock_acquired:
+            ensure_worker_task_running(_app)
         try:
             yield
         finally:
-            stop_event.set()
-            await task
+            log_event(
+                "app.lifecycle.stopping",
+                "ok",
+                pid=os.getpid(),
+                worker_enabled=worker_enabled,
+                worker_owner=worker_owner,
+                worker_lock_acquired=bool(_app.state.worker_lock_acquired),
+                active_job_id=getattr(queue, "current_job_id", None),
+                queue_paused=bool(queue.paused),
+            )
+            stop_event = getattr(_app.state, "worker_stop_event", None)
+            if stop_event is not None:
+                stop_event.set()
+            task = getattr(_app.state, "worker_task", None)
+            if task is not None:
+                await task
+            if _app.state.worker_lock_acquired:
+                db.release_worker_lock(worker_owner)
+            log_event(
+                "app.lifecycle.stopped",
+                "ok",
+                pid=os.getpid(),
+                worker_enabled=worker_enabled,
+                worker_owner=worker_owner,
+            )
 
     app = FastAPI(title="RAG Sync", version="0.1.0", lifespan=lifespan)
 
@@ -504,12 +948,47 @@ def create_app(
     def jobs() -> dict[str, object]:
         profile_names = getattr(app.state, "profile_names", configured_profile_names())
         files = db.list_file_summaries(profile_names=profile_names)
-        return {"jobs": enrich_jobs(db.list_jobs(), files)}
+        job_rows = current_job_rows(db.list_jobs())
+        queue = getattr(app.state, "queue", None)
+        timing_context = prepare_timing_context(db)
+        current_time = datetime.now(UTC).replace(tzinfo=None, microsecond=0)
+        files_by_id = {int(row["id"]): row for row in files}
+        enriched = enrich_jobs(
+            db,
+            job_rows,
+            files,
+            runtime_active_job=runtime_active_job_payload(queue, job_rows),
+            timing_context=timing_context,
+            now=current_time,
+        )
+        return {
+            "jobs": hide_resolved_failed_jobs(enriched, files_by_id)
+        }
 
     @app.get("/api/status")
     def status() -> dict[str, object]:
-        counts = db.job_counts()
         queue = getattr(app.state, "queue", None)
+        profile_names = getattr(app.state, "profile_names", configured_profile_names())
+        job_rows = current_job_rows(db.list_jobs())
+        files = db.list_file_summaries(profile_names=profile_names)
+        timing_context = prepare_timing_context(db)
+        current_time = datetime.now(UTC).replace(tzinfo=None, microsecond=0)
+        jobs = enrich_jobs(
+            db,
+            job_rows,
+            files,
+            runtime_active_job=runtime_active_job_payload(queue, job_rows),
+            timing_context=timing_context,
+            now=current_time,
+        )
+        files_by_id = {int(row["id"]): row for row in files}
+        jobs = hide_resolved_failed_jobs(jobs, files_by_id)
+        active_job = next((job for job in jobs if str(job.get("status")) == "running"), None)
+        counts = {"queued": 0, "running": 0, "failed": 0, "completed": 0}
+        for job in jobs:
+            status = str(job.get("status", ""))
+            if status in counts:
+                counts[status] += 1
         active = counts["running"]
         queued = counts["queued"]
         failed = counts["failed"]
@@ -519,14 +998,15 @@ def create_app(
             label = f"{failed} failed"
         else:
             label = "Idle"
-        profile_names = getattr(app.state, "profile_names", configured_profile_names())
-        jobs = enrich_jobs(
-            db.list_jobs(),
-            db.list_file_summaries(profile_names=profile_names),
-        )
-        active_job = next((job for job in jobs if str(job.get("status")) == "running"), None)
         return {
             "queue": {**counts, "paused": bool(queue.paused) if queue is not None else False},
+            "queue_eta": estimate_queue_timing(
+                db,
+                jobs,
+                files_by_id,
+                now=current_time,
+                timing_context=timing_context,
+            ),
             "label": label,
             "active": active_job,
             "system": read_system_metrics(),
@@ -538,14 +1018,27 @@ def create_app(
         if queue is None:
             raise HTTPException(status_code=503, detail="queue unavailable")
         queue.paused = True
+        log_event(
+            "queue.paused",
+            "ok",
+            pid=os.getpid(),
+            active_job_id=getattr(queue, "current_job_id", None),
+        )
         return {"paused": True}
 
     @app.post("/api/queue/resume")
-    def resume_queue() -> dict[str, bool]:
+    async def resume_queue() -> dict[str, bool]:
         queue = getattr(app.state, "queue", None)
         if queue is None:
             raise HTTPException(status_code=503, detail="queue unavailable")
         queue.paused = False
+        ensure_worker_task_running(app)
+        log_event(
+            "queue.resumed",
+            "ok",
+            pid=os.getpid(),
+            active_job_id=getattr(queue, "current_job_id", None),
+        )
         return {"paused": False}
 
     @app.post("/api/queue/kill")
@@ -556,6 +1049,14 @@ def create_app(
         queue.paused = True
         canceled = queue.request_cancel_running()
         terminated = terminate_active_parser_processes()
+        log_event(
+            "queue.kill_requested",
+            "ok",
+            pid=os.getpid(),
+            active_job_id=getattr(queue, "current_job_id", None),
+            canceled_running_job=bool(canceled),
+            terminated_processes=terminated,
+        )
         return {
             "paused": True,
             "canceled_running_job": canceled,

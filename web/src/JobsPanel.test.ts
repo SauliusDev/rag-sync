@@ -1,6 +1,19 @@
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { filterJobs, queueBadge } from './components/JobsPanel';
+import {
+  formatEtaTimestamp,
+  JobTableRow,
+  JobsSummaryStrip,
+  filterJobs,
+  progressPercent,
+  queueBadge,
+  queueEtaSummary,
+  resolvedPausedState,
+  stageDetail,
+} from './components/JobsPanel';
+import { StatusBadgeContent } from './components/StatusBadge';
 
 describe('jobs panel helpers', () => {
   it('filters canceled and completed jobs out of the default live queue view', () => {
@@ -57,5 +70,284 @@ describe('jobs panel helpers', () => {
         error_summary: '',
       }),
     ).toBe('#7');
+    expect(
+      queueBadge({
+        id: 3,
+        kind: 'sync_file',
+        status: 'queued',
+        queue_position: 0,
+        progress: 0,
+        error_summary: '',
+      }),
+    ).toBe('#0');
+    expect(
+      queueBadge({
+        id: 4,
+        kind: 'sync_file',
+        status: 'completed',
+        queue_position: 2,
+        progress: 1,
+        error_summary: '',
+      }),
+    ).toBe('-');
+  });
+
+  it('prefers backend progress percent and eta detail when present', () => {
+    const job = {
+      id: 9,
+      kind: 'sync_file',
+      status: 'running',
+      progress: 0.1,
+      progress_percent: 42,
+      eta_label: '8m remaining',
+      error_summary: '',
+    };
+
+    expect(progressPercent(job)).toBe(42);
+    expect(stageDetail(job)).toBe('42%');
+  });
+
+  it('uses eta text instead of fake percentages when no backend progress exists', () => {
+    const queued = {
+      id: 10,
+      kind: 'sync_file',
+      status: 'queued',
+      progress: 0,
+      eta_label: '15m remaining',
+      error_summary: '',
+    };
+
+    expect(progressPercent(queued)).toBe(0);
+    expect(stageDetail(queued)).toBe('15m remaining');
+  });
+
+  it('builds queue eta summary values from queue status', () => {
+    expect(
+      queueEtaSummary({
+        label: '1 active · 10 queued',
+        queue: { running: 1, queued: 10 },
+        eta: {
+          label: '2h remaining',
+          throughput_label: 'recent median 8m/file',
+          estimated_finish_at: '2026-06-26T12:00:00',
+          confidence: 'medium',
+        },
+      }),
+    ).toEqual({
+      remaining: '2h remaining',
+      finishAt: '2026-06-26 12:00',
+      throughput: 'recent median 8m/file',
+    });
+  });
+
+  it('prefers the primary queue_eta payload when present', () => {
+    expect(
+      queueEtaSummary({
+        label: '1 active · 10 queued',
+        queue: { running: 1, queued: 10 },
+        queue_eta: {
+          label: '90m remaining',
+          throughput_label: 'recent median 6m/file',
+          estimated_finish_at: '2026-06-26T11:30:00',
+          confidence: 'high',
+        },
+      }),
+    ).toEqual({
+      remaining: '90m remaining',
+      finishAt: '2026-06-26 11:30',
+      throughput: 'recent median 6m/file',
+    });
+  });
+
+  it('formats estimated finish timestamps for the summary strip', () => {
+    expect(
+      queueEtaSummary({
+        label: '1 active · 10 queued',
+        queue: { running: 1, queued: 10 },
+        queue_eta: {
+          label: '90m remaining',
+          throughput_label: 'recent median 6m/file',
+          estimated_finish_at: '2026-06-26T11:30:00',
+          confidence: 'high',
+        },
+      }),
+    ).toEqual({
+      remaining: '90m remaining',
+      finishAt: '2026-06-26 11:30',
+      throughput: 'recent median 6m/file',
+    });
+  });
+
+  it('formats iso eta timestamps and falls back cleanly', () => {
+    expect(formatEtaTimestamp('2026-06-26T11:30:00')).toBe('2026-06-26 11:30');
+    expect(formatEtaTimestamp('unknown')).toBe('unknown');
+    expect(formatEtaTimestamp(null)).toBe('unknown');
+  });
+
+  it('reconciles paused state from the refreshed status snapshot', () => {
+    expect(
+      resolvedPausedState(false, {
+        label: 'Paused',
+        queue: { paused: true },
+      }),
+    ).toBe(true);
+    expect(
+      resolvedPausedState(true, {
+        label: 'Running',
+        queue: { paused: false },
+      }),
+    ).toBe(false);
+    expect(
+      resolvedPausedState(true, {
+        label: 'Running',
+        queue: {},
+      }),
+    ).toBe(true);
+    expect(resolvedPausedState(true, null)).toBe(true);
+  });
+
+  it('does not render the active file badge in the status header', () => {
+    const markup = renderToStaticMarkup(
+      createElement(StatusBadgeContent, {
+        status: {
+          label: '1 active · 10 queued',
+          queue: { running: 1, queued: 10 },
+          active: {
+            id: 1,
+            kind: 'sync_file',
+            status: 'running',
+            progress: 0.2,
+            error_summary: '',
+            file_name: 'Very Long File Name.pdf',
+            stage: { key: 'convert', label: 'Marker conversion', status: 'running', progress: 0.2 },
+          },
+          system: { cpu: { label: 'CPU 18%' } },
+        },
+      }),
+    );
+
+    expect(markup).toContain('1 active · 10 queued');
+    expect(markup).not.toContain('Very Long File Name.pdf');
+    expect(markup).not.toContain('Marker conversion');
+  });
+
+  it('renders queue eta summary information in the jobs strip', () => {
+    const markup = renderToStaticMarkup(
+      createElement(JobsSummaryStrip, {
+        summary: { running: 1, queued: 10, failed: 2, completed: 21 },
+        status: {
+          label: '1 active · 10 queued',
+          queue: { running: 1, queued: 10, failed: 2, completed: 21 },
+          eta: {
+            label: '2h remaining',
+            throughput_label: 'recent median 8m/file',
+            estimated_finish_at: '2026-06-26T12:00:00',
+            confidence: 'medium',
+          },
+        },
+      }),
+    );
+
+    expect(markup).toContain('2h remaining');
+    expect(markup).toContain('2026-06-26 12:00');
+    expect(markup).toContain('recent median 8m/file');
+  });
+
+  it('renders eta, wait, and confidence in a job row without fake percent text', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        'table',
+        null,
+        createElement(
+          'tbody',
+          null,
+          createElement(JobTableRow, {
+            job: {
+              id: 1,
+              kind: 'sync_file',
+              status: 'queued',
+              progress: 0,
+              error_summary: '',
+              file_name: 'book.pdf',
+              source_path: '/tmp/book.pdf',
+              profile_name: 'quant-books',
+              wait_label: '12m',
+              eta_label: '45m remaining',
+              confidence: 'low',
+              stage: { key: 'queued', label: 'Queued', status: 'queued', progress: 0 },
+            },
+          }),
+        ),
+      ),
+    );
+
+    expect(markup).toContain('Wait 12m');
+    expect(markup).toContain('ETA 45m remaining');
+    expect(markup).toContain('low');
+    expect(markup).toContain('45m remaining');
+    expect(markup).not.toContain('stage-percent">0%');
+  });
+
+  it('renders terminal rows without queue timing placeholders', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        'table',
+        null,
+        createElement(
+          'tbody',
+          null,
+          createElement(JobTableRow, {
+            job: {
+              id: 2,
+              kind: 'sync_file',
+              status: 'completed',
+              progress: 1,
+              error_summary: '',
+              file_name: 'done.pdf',
+              source_path: '/tmp/done.pdf',
+              profile_name: 'quant-books',
+              eta_label: 'unknown',
+              wait_label: 'unknown',
+              confidence: 'estimating',
+              stage: { key: 'done', label: 'Done', status: 'completed', progress: 1 },
+            },
+          }),
+        ),
+      ),
+    );
+
+    expect(markup).toContain('Completed');
+    expect(markup).toContain('100%');
+    expect(markup).not.toContain('ETA unknown');
+    expect(markup).not.toContain('Wait unknown');
+  });
+
+  it('renders canceled rows with canceled styling tone', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        'table',
+        null,
+        createElement(
+          'tbody',
+          null,
+          createElement(JobTableRow, {
+            job: {
+              id: 3,
+              kind: 'sync_file',
+              status: 'canceled',
+              progress: 0,
+              error_summary: '',
+              file_name: 'canceled.pdf',
+              source_path: '/tmp/canceled.pdf',
+              profile_name: 'quant-books',
+              stage: { key: 'done', label: 'Done', status: 'canceled', progress: 0 },
+            },
+          }),
+        ),
+      ),
+    );
+
+    expect(markup).toContain('state-canceled');
+    expect(markup).toContain('Canceled');
   });
 });

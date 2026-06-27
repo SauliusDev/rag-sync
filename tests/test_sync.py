@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from rag_sync import ldd
 from rag_sync.db import RagSyncDb
 from rag_sync.models import ParserMode, Profile, SourceState
+from rag_sync.parsers import ParserResult
 from rag_sync.scanner import sha256_file
 from rag_sync.sync import (
     DEFAULT_DATA_DIR,
@@ -164,6 +166,219 @@ def test_convert_source_file_records_blocked_artifact_then_raises(
     assert row["state"] == "failed"
 
 
+def test_convert_source_file_falls_back_to_mineru_for_pdf_books(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp: Path,
+):
+    source_dir = project_tmp / "books"
+    source_dir.mkdir()
+    source_file = source_dir / "example.pdf"
+    source_file.write_bytes(b"pdf")
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    source_id = _add_source(db, source_file, source_type="book")
+    profile = Profile(
+        name="quant-articles",
+        source_paths=(source_dir,),
+        file_types=("pdf",),
+        parser_mode=ParserMode.MARKER,
+        target_dataset="dataset-name",
+        source_type="book",
+    )
+    monkeypatch.chdir(project_tmp)
+    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+
+    class FailingMarker:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            raise RuntimeError("marker failed")
+
+    class WorkingMineru:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("# mineru body\n\n$alpha + beta$\n", encoding="utf-8")
+            return ParserResult("mineru", output_path, "", "")
+
+    def fake_parser_for_name(parser_name: str):
+        if parser_name == "marker":
+            return FailingMarker()
+        if parser_name == "mineru":
+            return WorkingMineru()
+        raise AssertionError(f"unexpected parser {parser_name}")
+
+    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+
+    output_path = convert_source_file(db, source_id)
+
+    artifact = db.latest_artifact_for_source(source_id)
+    row = db.list_source_files()[0]
+    assert output_path == (
+        DEFAULT_DATA_DIR
+        / f"outputs/quant-articles/mineru/example-{_path_hash(source_file)}.md"
+    )
+    assert artifact is not None
+    assert artifact["parser"] == "mineru"
+    assert row["state"] == "converted"
+
+
+def test_convert_source_file_falls_back_when_marker_output_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp: Path,
+):
+    source_dir = project_tmp / "books"
+    source_dir.mkdir()
+    source_file = source_dir / "empty-marker.pdf"
+    source_file.write_bytes(b"pdf")
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    source_id = _add_source(db, source_file, source_type="book")
+    profile = Profile(
+        name="quant-articles",
+        source_paths=(source_dir,),
+        file_types=("pdf",),
+        parser_mode=ParserMode.MARKER,
+        target_dataset="dataset-name",
+        source_type="book",
+    )
+    monkeypatch.chdir(project_tmp)
+    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+
+    class EmptyMarker:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("", encoding="utf-8")
+            return ParserResult("marker", output_path, "", "")
+
+    class WorkingMineru:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("# mineru body\n\n$alpha + beta$\n", encoding="utf-8")
+            return ParserResult("mineru", output_path, "", "")
+
+    def fake_parser_for_name(parser_name: str):
+        if parser_name == "marker":
+            return EmptyMarker()
+        if parser_name == "mineru":
+            return WorkingMineru()
+        raise AssertionError(f"unexpected parser {parser_name}")
+
+    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+
+    output_path = convert_source_file(db, source_id)
+
+    with db.connect() as conn:
+        artifacts = conn.execute(
+            "SELECT parser, quality_status FROM artifacts WHERE source_file_id = ? ORDER BY id",
+            (source_id,),
+        ).fetchall()
+    row = db.list_source_files()[0]
+    assert output_path == (
+        DEFAULT_DATA_DIR
+        / f"outputs/quant-articles/mineru/empty-marker-{_path_hash(source_file)}.md"
+    )
+    assert [(row["parser"], row["quality_status"]) for row in artifacts] == [
+        ("marker", "blocked"),
+        ("mineru", "clean"),
+    ]
+    assert row["state"] == "converted"
+
+
+def test_convert_source_file_logs_marker_fallback_to_mineru(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp: Path,
+):
+    source_dir = project_tmp / "books"
+    source_dir.mkdir()
+    source_file = source_dir / "example.pdf"
+    source_file.write_bytes(b"pdf")
+    log_path = project_tmp / "rag-sync.log"
+    ldd.set_log_path_for_tests(log_path)
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    source_id = _add_source(db, source_file, source_type="book")
+    profile = Profile(
+        name="quant-articles",
+        source_paths=(source_dir,),
+        file_types=("pdf",),
+        parser_mode=ParserMode.MARKER,
+        target_dataset="dataset-name",
+        source_type="book",
+    )
+    monkeypatch.chdir(project_tmp)
+    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+
+    class FailingMarker:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            raise RuntimeError("marker failed")
+
+    class WorkingMineru:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("# mineru body\n", encoding="utf-8")
+            return ParserResult("mineru", output_path, "", "")
+
+    def fake_parser_for_name(parser_name: str):
+        if parser_name == "marker":
+            return FailingMarker()
+        if parser_name == "mineru":
+            return WorkingMineru()
+        raise AssertionError(f"unexpected parser {parser_name}")
+
+    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+
+    try:
+        convert_source_file(db, source_id)
+    finally:
+        ldd.set_log_path_for_tests(None)
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = [record["event"] for record in records]
+    assert "conversion.started" in events
+    assert "conversion.failed" in events
+    assert "conversion.fallback.started" in events
+    assert "conversion.fallback.completed" in events
+    fallback = [record for record in records if record["event"] == "conversion.fallback.started"][-1]
+    assert fallback["from_parser"] == "marker"
+    assert fallback["to_parser"] == "mineru"
+    assert fallback["source_file_id"] == source_id
+
+
+def test_convert_source_file_does_not_fallback_when_parser_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp: Path,
+):
+    source_dir = project_tmp / "books"
+    source_dir.mkdir()
+    source_file = source_dir / "example.pdf"
+    source_file.write_bytes(b"pdf")
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    source_id = _add_source(db, source_file, source_type="book")
+    profile = Profile(
+        name="quant-articles",
+        source_paths=(source_dir,),
+        file_types=("pdf",),
+        parser_mode=ParserMode.MARKER,
+        target_dataset="dataset-name",
+        source_type="book",
+    )
+    monkeypatch.chdir(project_tmp)
+    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+
+    class FailingMarker:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            raise RuntimeError("marker failed")
+
+    def fake_parser_for_name(parser_name: str):
+        if parser_name == "marker":
+            return FailingMarker()
+        raise AssertionError(f"unexpected parser {parser_name}")
+
+    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+
+    with pytest.raises(RuntimeError, match="marker failed"):
+        convert_source_file(db, source_id, parser_name="marker")
+
+
 class FakeRagFlowClient:
     def __init__(
         self,
@@ -315,7 +530,7 @@ def test_upload_latest_artifact_validates_missing_ids(
         asyncio.run(upload_latest_artifact(db, source_id, client))
 
 
-def test_parse_uploaded_document_marks_parsed(project_tmp: Path):
+def test_parse_uploaded_document_marks_parsing_until_ragflow_finishes(project_tmp: Path):
     db, source_id, _ = _converted_source_with_artifact(project_tmp)
     db.upsert_ragflow_document(
         source_file_id=source_id,
@@ -335,8 +550,8 @@ def test_parse_uploaded_document_marks_parsed(project_tmp: Path):
     row = db.list_source_files()[0]
     assert result == {"code": 0, "message": "ok"}
     assert client.parsed == [("dataset-id", ["document-id"])]
-    assert doc["parse_status"] == "parsed"
-    assert row["state"] == "parsed"
+    assert doc["parse_status"] == "parsing"
+    assert row["state"] == "uploaded"
 
 
 def test_parse_uploaded_document_errors_when_upload_missing(project_tmp: Path):

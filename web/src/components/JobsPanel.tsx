@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { fetchJobs, fetchStatus, killQueue, pauseQueue, resumeQueue, type JobRecord } from '../api';
+import {
+  fetchJobs,
+  fetchStatus,
+  killQueue,
+  pauseQueue,
+  resumeQueue,
+  type JobRecord,
+  type QueueStatus,
+} from '../api';
+
+const QUEUE_REFRESH_EVENT = 'rag-sync:queue-refresh';
+const POLL_INTERVAL_MS = 2000;
 
 type JobVisibility = {
   queued: boolean;
@@ -22,14 +33,98 @@ function formatTimestamp(value?: string | null) {
   return value || '-';
 }
 
-function progressPercent(job: JobRecord) {
+export function progressPercent(job: JobRecord) {
+  if (typeof job.progress_percent === 'number') {
+    return Math.max(0, Math.min(100, Math.round(job.progress_percent)));
+  }
+  if (job.status === 'queued') {
+    return 0;
+  }
   const stageProgress = job.stage?.progress ?? job.progress ?? 0;
   return Math.max(0, Math.min(100, Math.round(stageProgress * 100)));
+}
+
+export function stageDetail(job: JobRecord) {
+  if (job.status === 'completed') {
+    return '100%';
+  }
+  if (job.status === 'failed') {
+    return 'failed';
+  }
+  if (job.status === 'canceled') {
+    return 'canceled';
+  }
+  if (typeof job.progress_percent === 'number') {
+    return `${progressPercent(job)}%`;
+  }
+  if (job.eta_label) {
+    return job.eta_label;
+  }
+  if (job.status === 'running' || job.status === 'queued') {
+    return 'estimating';
+  }
+  if (job.status === 'completed') {
+    return '100%';
+  }
+  return '-';
+}
+
+export function queueEtaSummary(status: QueueStatus | null) {
+  const eta = status?.queue_eta ?? status?.eta;
+  return {
+    remaining: eta?.label ?? 'estimating',
+    finishAt: formatEtaTimestamp(eta?.estimated_finish_at),
+    throughput: eta?.throughput_label ?? 'Building timing history',
+  };
+}
+
+export function formatEtaTimestamp(value?: string | null) {
+  if (!value) {
+    return 'unknown';
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(value);
+  if (match) {
+    return `${match[1]} ${match[2]}`;
+  }
+  return value;
+}
+
+export function resolvedPausedState(commandPaused: boolean, status: QueueStatus | null) {
+  if (typeof status?.queue.paused === 'boolean') {
+    return status.queue.paused;
+  }
+  return commandPaused;
+}
+
+function confidenceLabel(confidence?: string) {
+  return confidence ? confidence.replace('_', ' ') : 'estimating';
+}
+
+function timingLines(job: JobRecord) {
+  const lines = [
+    `Start ${formatTimestamp(job.started_at)}`,
+    `End ${formatTimestamp(job.finished_at)}`,
+  ];
+  if (job.status === 'running' || job.status === 'queued') {
+    lines.push(`Wait ${job.wait_label ?? '-'}`);
+    lines.push(`ETA ${job.eta_label ?? 'estimating'}`);
+    lines.push(confidenceLabel(job.confidence));
+    return lines;
+  }
+  if (job.status === 'completed') {
+    lines.push('Completed');
+  } else if (job.status === 'failed') {
+    lines.push('Failed');
+  } else if (job.status === 'canceled') {
+    lines.push('Canceled');
+  }
+  return lines;
 }
 
 function stageTone(job: JobRecord) {
   if (job.status === 'failed') return 'failed';
   if (job.status === 'completed') return 'completed';
+  if (job.status === 'canceled') return 'canceled';
   if (job.status === 'running') return 'running';
   return 'queued';
 }
@@ -63,12 +158,106 @@ export function filterJobs(
 
 export function queueBadge(job: JobRecord) {
   if (job.status === 'running') return 'Now';
-  if (job.queue_position) return `#${job.queue_position}`;
+  if (job.status === 'queued' && typeof job.queue_position === 'number') {
+    return `#${job.queue_position}`;
+  }
   return '-';
+}
+
+export function JobsSummaryStrip({
+  summary,
+  status,
+}: {
+  summary: { queued: number; running: number; failed: number; completed: number };
+  status: QueueStatus | null;
+}) {
+  const etaSummary = queueEtaSummary(status);
+
+  return (
+    <div className="jobs-summary">
+      <div className="jobs-summary-card">
+        <strong>{summary.running}</strong>
+        <span>Active</span>
+      </div>
+      <div className="jobs-summary-card">
+        <strong>{summary.queued}</strong>
+        <span>Queued</span>
+      </div>
+      <div className="jobs-summary-card">
+        <strong>{summary.failed}</strong>
+        <span>Failed</span>
+      </div>
+      <div className="jobs-summary-card">
+        <strong>{summary.completed}</strong>
+        <span>Completed</span>
+      </div>
+      <div className="jobs-summary-card jobs-summary-wide">
+        <strong>{etaSummary.remaining}</strong>
+        <span>Queue ETA</span>
+      </div>
+      <div className="jobs-summary-card jobs-summary-wide">
+        <strong>{etaSummary.finishAt}</strong>
+        <span>Estimated finish</span>
+      </div>
+      <div className="jobs-summary-card jobs-summary-wide">
+        <strong>{etaSummary.throughput}</strong>
+        <span>Recent throughput</span>
+      </div>
+    </div>
+  );
+}
+
+export function JobTableRow({ job }: { job: JobRecord }) {
+  return (
+    <tr>
+      <td>
+        <div className="queue-cell">
+          <span className={`state-badge state-${job.status}`}>{queueBadge(job)}</span>
+          <span className="queue-meta">#{job.id}</span>
+        </div>
+      </td>
+      <td>
+        <div className="job-file">
+          <strong>{job.file_name || '-'}</strong>
+          <span>{job.source_path || '-'}</span>
+        </div>
+      </td>
+      <td>
+        <div className="stage-cell">
+          <div className="stage-cell-top">
+            <span className={`state-badge state-${stageTone(job)}`}>{job.stage?.label ?? job.kind}</span>
+            <span className="stage-percent">{stageDetail(job)}</span>
+          </div>
+          <div className="mini-progress">
+            <span style={{ width: `${progressPercent(job)}%` }} />
+          </div>
+        </div>
+      </td>
+      <td>{job.profile_name || '-'}</td>
+      <td>
+        <div className="job-time">
+          {timingLines(job).map((line) => (
+            <span
+              key={line}
+              className={
+                line === confidenceLabel(job.confidence) && (job.status === 'running' || job.status === 'queued')
+                  ? 'job-confidence'
+                  : undefined
+              }
+            >
+              {line}
+            </span>
+          ))}
+        </div>
+      </td>
+      <td className="job-error">{job.error_summary || '-'}</td>
+    </tr>
+  );
 }
 
 export function JobsPanel() {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
+  const [status, setStatus] = useState<QueueStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [visibility, setVisibility] = useState<JobVisibility>(defaultVisibility);
@@ -78,13 +267,19 @@ export function JobsPanel() {
 
   useEffect(() => {
     let cancelled = false;
+    let loading = false;
 
     async function load() {
+      if (loading) {
+        return;
+      }
+      loading = true;
       try {
         const [nextJobs, status] = await Promise.all([fetchJobs(), fetchStatus()]);
         if (!cancelled) {
           setJobs(nextJobs);
-          setPaused(Boolean(status.queue.paused));
+          setStatus(status);
+          setPaused((current) => resolvedPausedState(current, status));
           setError('');
         }
       } catch (cause) {
@@ -95,26 +290,44 @@ export function JobsPanel() {
         if (!cancelled) {
           setLoading(false);
         }
+        loading = false;
       }
     }
 
+    function handleVisibilityRefresh() {
+      if (document.visibilityState === 'visible') {
+        void load();
+      }
+    }
+
+    function handleRefreshEvent() {
+      void load();
+    }
+
     void load();
-    const timer = window.setInterval(load, 5000);
+    const timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
+    window.addEventListener('focus', handleRefreshEvent);
+    document.addEventListener('visibilitychange', handleVisibilityRefresh);
+    window.addEventListener(QUEUE_REFRESH_EVENT, handleRefreshEvent);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      window.removeEventListener('focus', handleRefreshEvent);
+      document.removeEventListener('visibilitychange', handleVisibilityRefresh);
+      window.removeEventListener(QUEUE_REFRESH_EVENT, handleRefreshEvent);
     };
   }, []);
 
   const summary = useMemo(() => {
-    const counts = { queued: 0, running: 0, failed: 0, completed: 0, canceled: 0 };
-    for (const job of jobs) {
-      if (job.status in counts) {
-        counts[job.status as keyof typeof counts] += 1;
-      }
-    }
-    return counts;
-  }, [jobs]);
+    return {
+      queued: status?.queue.queued ?? jobs.filter((job) => job.status === 'queued').length,
+      running: status?.queue.running ?? jobs.filter((job) => job.status === 'running').length,
+      failed: status?.queue.failed ?? jobs.filter((job) => job.status === 'failed').length,
+      completed:
+        status?.queue.completed ?? jobs.filter((job) => job.status === 'completed').length,
+      canceled: jobs.filter((job) => job.status === 'canceled').length,
+    };
+  }, [jobs, status]);
 
   const visibleJobs = useMemo(() => filterJobs(jobs, visibility, query), [jobs, query, visibility]);
 
@@ -127,9 +340,12 @@ export function JobsPanel() {
     try {
       const result = paused ? await resumeQueue() : await pauseQueue();
       setPaused(result.paused);
-      const nextJobs = await fetchJobs();
+      const [nextJobs, nextStatus] = await Promise.all([fetchJobs(), fetchStatus()]);
       setJobs(nextJobs);
+      setStatus(nextStatus);
+      setPaused(resolvedPausedState(result.paused, nextStatus));
       setError('');
+      window.dispatchEvent(new Event(QUEUE_REFRESH_EVENT));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Failed to update queue state');
     } finally {
@@ -144,8 +360,10 @@ export function JobsPanel() {
       setPaused(result.paused);
       const [nextJobs, status] = await Promise.all([fetchJobs(), fetchStatus()]);
       setJobs(nextJobs);
-      setPaused(Boolean(status.queue.paused));
+      setStatus(status);
+      setPaused(resolvedPausedState(result.paused, status));
       setError('');
+      window.dispatchEvent(new Event(QUEUE_REFRESH_EVENT));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Failed to stop running job');
     } finally {
@@ -159,24 +377,7 @@ export function JobsPanel() {
 
   return (
     <div className="jobs-view">
-      <div className="jobs-summary">
-        <div className="jobs-summary-card">
-          <strong>{summary.running}</strong>
-          <span>Active</span>
-        </div>
-        <div className="jobs-summary-card">
-          <strong>{summary.queued}</strong>
-          <span>Queued</span>
-        </div>
-        <div className="jobs-summary-card">
-          <strong>{summary.failed}</strong>
-          <span>Failed</span>
-        </div>
-        <div className="jobs-summary-card">
-          <strong>{summary.completed}</strong>
-          <span>Completed</span>
-        </div>
-      </div>
+      <JobsSummaryStrip summary={summary} status={status} />
       <div className="jobs-toolbar">
         <label className="search-field jobs-search">
           <input
@@ -267,43 +468,7 @@ export function JobsPanel() {
                 </td>
               </tr>
             ) : (
-              visibleJobs.map((job) => (
-                <tr key={job.id}>
-                  <td>
-                    <div className="queue-cell">
-                      <span className={`state-badge state-${job.status}`}>{queueBadge(job)}</span>
-                      <span className="queue-meta">#{job.id}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="job-file">
-                      <strong>{job.file_name || '-'}</strong>
-                      <span>{job.source_path || '-'}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="stage-cell">
-                      <div className="stage-cell-top">
-                        <span className={`state-badge state-${stageTone(job)}`}>
-                          {job.stage?.label ?? job.kind}
-                        </span>
-                        <span className="stage-percent">{progressPercent(job)}%</span>
-                      </div>
-                      <div className="mini-progress">
-                        <span style={{ width: `${progressPercent(job)}%` }} />
-                      </div>
-                    </div>
-                  </td>
-                  <td>{job.profile_name || '-'}</td>
-                  <td>
-                    <div className="job-time">
-                      <span>Start {formatTimestamp(job.started_at)}</span>
-                      <span>End {formatTimestamp(job.finished_at)}</span>
-                    </div>
-                  </td>
-                  <td className="job-error">{job.error_summary || '-'}</td>
-                </tr>
-              ))
+              visibleJobs.map((job) => <JobTableRow key={job.id} job={job} />)
             )}
           </tbody>
         </table>

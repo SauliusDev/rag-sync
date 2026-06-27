@@ -1,7 +1,8 @@
 from pathlib import Path
+import subprocess
 
 from rag_sync.models import ParserMode, Profile, SkipRules
-from rag_sync.scanner import discover_files, scan_profile, sha256_file
+from rag_sync.scanner import discover_files, pdf_metadata, scan_profile, sha256_file
 
 
 def test_discover_files_skips_meta_folder(project_tmp: Path):
@@ -88,3 +89,24 @@ def test_scan_profile_marks_new_and_unchanged(project_tmp: Path):
 
     assert first[0].state == "new"
     assert second[0].state == "unchanged"
+
+
+def test_pdf_metadata_extracts_page_count_and_producer(monkeypatch):
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=(
+                "Title: Example\n"
+                "Pages: 570\n"
+                "Producer: Adobe Acrobat 10.01 Paper Capture Plug-in with ClearScan\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("rag_sync.scanner.subprocess.run", fake_run)
+
+    metadata = pdf_metadata(Path("/tmp/example.pdf"))
+
+    assert metadata["page_count"] == 570
+    assert metadata["pdf_producer"] == "Adobe Acrobat 10.01 Paper Capture Plug-in with ClearScan"

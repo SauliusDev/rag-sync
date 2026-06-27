@@ -742,9 +742,15 @@ h1 {
   color: #16a34a;
 }
 
+.state-canceled,
 .state-running {
   border-color: rgb(37 99 235 / 35%);
   color: var(--accent);
+}
+
+.state-canceled {
+  border-color: var(--danger-border);
+  color: var(--danger);
 }
 
 .state-queued {
@@ -864,7 +870,7 @@ h1 {
 
 .jobs-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
   position: relative;
   z-index: 3;
@@ -912,6 +918,15 @@ h1 {
 .jobs-summary-card span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.jobs-summary-wide {
+  min-width: 0;
+}
+
+.jobs-summary-wide strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 .jobs-table-wrap {
@@ -980,6 +995,10 @@ h1 {
 
 .job-time {
   min-width: 170px;
+}
+
+.job-confidence {
+  text-transform: capitalize;
 }
 
 .job-error {

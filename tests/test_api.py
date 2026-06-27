@@ -1,3 +1,4 @@
+import threading
 import time
 import json
 from pathlib import Path
@@ -5,6 +6,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import rag_sync.api
+import rag_sync.queue
+from rag_sync import ldd
 from rag_sync.api import create_app
 from rag_sync.db import RagSyncDb
 from rag_sync.models import SourceState
@@ -565,6 +568,548 @@ source_type = "book"
     assert calls == [("convert", source_id), ("upload", source_id), ("parse", source_id)]
 
 
+def test_background_worker_records_completed_stage_history_for_sync_file_job(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-books"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "marker"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=source.stat().st_size,
+        mtime=source.stat().st_mtime,
+        state=SourceState.NEW,
+    )
+
+    def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
+        return tmp_path / "book.md"
+
+    async def fake_upload(actual_db, source_file_id, client=None, profile_path=config):
+        return {"dataset_id": "dataset", "document_id": "doc", "document_name": "book.md"}
+
+    async def fake_parse(actual_db, source_file_id, client=None):
+        return {"code": 0}
+
+    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+
+    with TestClient(
+        create_app(
+            profile_path=config,
+            db_factory=lambda: db,
+            worker_poll_interval=0.01,
+        )
+    ) as client:
+        response = client.post(
+            "/api/jobs",
+            json={
+                "kind": "sync_file",
+                "source_file_id": source_id,
+                "profile_name": "quant-books",
+            },
+        )
+        assert response.status_code == 200
+        for _ in range(50):
+            rows = db.completed_stage_durations(limit=3)
+            if len(rows) == 3:
+                break
+            time.sleep(0.02)
+
+    assert db.list_jobs(limit=1)[0]["status"] == "completed"
+    rows = db.completed_stage_durations(limit=3)
+    assert [row["stage"] for row in rows] == ["parse", "upload", "convert"]
+    assert all(row["profile_name"] == "quant-books" for row in rows)
+    assert all(row["source_type"] == "book" for row in rows)
+    assert all(row["extension"] == "pdf" for row in rows)
+    assert all(row["parser"] == "marker" for row in rows)
+    assert all(row["duration_seconds"] is not None for row in rows)
+
+
+def test_background_worker_records_current_parser_in_stage_history_for_resync(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-books"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "mineru"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=source.stat().st_size,
+        mtime=source.stat().st_mtime,
+        state=SourceState.CONVERTED,
+    )
+    db.add_artifact(
+        source_id,
+        "marker",
+        str(tmp_path / "old-book.md"),
+        "old-artifact-sha",
+        "ok",
+        "[]",
+    )
+
+    def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
+        return tmp_path / "new-book.md"
+
+    async def fake_upload(actual_db, source_file_id, client=None, profile_path=config):
+        return {"dataset_id": "dataset", "document_id": "doc", "document_name": "new-book.md"}
+
+    async def fake_parse(actual_db, source_file_id, client=None):
+        return {"code": 0}
+
+    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+
+    with TestClient(
+        create_app(
+            profile_path=config,
+            db_factory=lambda: db,
+            worker_poll_interval=0.01,
+        )
+    ) as client:
+        response = client.post(
+            "/api/jobs",
+            json={
+                "kind": "sync_file",
+                "source_file_id": source_id,
+                "profile_name": "quant-books",
+            },
+        )
+        assert response.status_code == 200
+        for _ in range(50):
+            rows = db.completed_stage_durations(limit=3)
+            if len(rows) >= 3:
+                break
+            time.sleep(0.02)
+
+    rows = db.completed_stage_durations(limit=3)
+    assert [row["parser"] for row in rows] == ["mineru", "mineru", "mineru"]
+
+
+def test_background_worker_updates_pipeline_parser_after_marker_fallback(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-books"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "marker"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=source.stat().st_size,
+        mtime=source.stat().st_mtime,
+        state=SourceState.NEW,
+    )
+
+    def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
+        actual_db.add_artifact(
+            source_file_id,
+            "mineru",
+            str(tmp_path / "book.md"),
+            "artifact-sha",
+            "clean",
+            "[]",
+        )
+        return tmp_path / "book.md"
+
+    async def fake_upload(actual_db, source_file_id, client=None, profile_path=config):
+        return {"dataset_id": "dataset", "document_id": "doc", "document_name": "book.md"}
+
+    async def fake_parse(actual_db, source_file_id, client=None):
+        return {"code": 0}
+
+    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+
+    with TestClient(
+        create_app(
+            profile_path=config,
+            db_factory=lambda: db,
+            worker_poll_interval=0.01,
+        )
+    ) as client:
+        response = client.post(
+            "/api/jobs",
+            json={
+                "kind": "sync_file",
+                "source_file_id": source_id,
+                "profile_name": "quant-books",
+            },
+        )
+        assert response.status_code == 200
+        for _ in range(50):
+            job = db.list_jobs(limit=1)[0]
+            if job["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    rows = db.completed_stage_durations(limit=3)
+    assert [row["parser"] for row in rows] == ["mineru", "mineru", "mineru"]
+    with db.session() as conn:
+        run = conn.execute(
+            "SELECT parser FROM pipeline_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert run is not None
+    assert run["parser"] == "mineru"
+
+
+def test_background_worker_uses_source_profile_parser_when_job_profile_is_missing(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-books"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "mineru"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=source.stat().st_size,
+        mtime=source.stat().st_mtime,
+        state=SourceState.NEW,
+    )
+
+    def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
+        return tmp_path / "book.md"
+
+    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+
+    with TestClient(
+        create_app(
+            profile_path=config,
+            db_factory=lambda: db,
+            worker_poll_interval=0.01,
+        )
+    ) as client:
+        response = client.post(
+            "/api/jobs",
+            json={
+                "kind": "convert",
+                "source_file_id": source_id,
+            },
+        )
+        assert response.status_code == 200
+        for _ in range(50):
+            rows = db.completed_stage_durations(limit=1)
+            if rows:
+                break
+            time.sleep(0.02)
+
+    rows = db.completed_stage_durations(limit=1)
+    assert rows[0]["parser"] == "mineru"
+    with db.session() as conn:
+        run = conn.execute(
+            "SELECT profile_name, parser FROM pipeline_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert run is not None
+    assert run["profile_name"] == "quant-books"
+    assert run["parser"] == "mineru"
+
+
+def test_background_worker_uses_source_profile_when_job_profile_is_stale(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-books"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "mineru"
+target_dataset = "quant-books"
+source_type = "book"
+
+[[profiles]]
+name = "stale-profile"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "marker"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=source.stat().st_size,
+        mtime=source.stat().st_mtime,
+        state=SourceState.NEW,
+    )
+
+    def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
+        return tmp_path / "book.md"
+
+    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+
+    with TestClient(
+        create_app(
+            profile_path=config,
+            db_factory=lambda: db,
+            worker_poll_interval=0.01,
+        )
+    ) as client:
+        response = client.post(
+            "/api/jobs",
+            json={
+                "kind": "convert",
+                "source_file_id": source_id,
+                "profile_name": "stale-profile",
+            },
+        )
+        assert response.status_code == 200
+        for _ in range(50):
+            rows = db.completed_stage_durations(limit=1)
+            if rows:
+                break
+            time.sleep(0.02)
+
+    rows = db.completed_stage_durations(limit=1)
+    assert rows[0]["profile_name"] == "quant-books"
+    assert rows[0]["parser"] == "mineru"
+    with db.session() as conn:
+        run = conn.execute(
+            "SELECT profile_name, parser FROM pipeline_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert run is not None
+    assert run["profile_name"] == "quant-books"
+    assert run["parser"] == "mineru"
+
+
+def test_background_worker_records_canceled_stage_history_when_job_is_killed(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-books"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "marker"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=source.stat().st_size,
+        mtime=source.stat().st_mtime,
+        state=SourceState.NEW,
+    )
+    started = threading.Event()
+    queue_holder: dict[str, object] = {}
+
+    def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
+        started.set()
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            queue = queue_holder.get("queue")
+            if queue is not None and getattr(queue, "cancel_requested_job_ids", set()):
+                raise RuntimeError("killed by user")
+            time.sleep(0.01)
+        raise RuntimeError("expected cancel request")
+
+    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(rag_sync.api, "terminate_active_parser_processes", lambda: 1)
+
+    with TestClient(
+        create_app(
+            profile_path=config,
+            db_factory=lambda: db,
+            worker_poll_interval=0.01,
+        )
+    ) as client:
+        queue_holder["queue"] = client.app.state.queue
+        response = client.post(
+            "/api/jobs",
+            json={
+                "kind": "sync_file",
+                "source_file_id": source_id,
+                "profile_name": "quant-books",
+            },
+        )
+        assert response.status_code == 200
+        assert started.wait(1.0)
+        kill_response = client.post("/api/queue/kill")
+        assert kill_response.status_code == 200
+        for _ in range(50):
+            job = db.list_jobs(limit=1)[0]
+            if job["status"] == "canceled":
+                break
+            time.sleep(0.02)
+
+    assert db.list_jobs(limit=1)[0]["status"] == "canceled"
+    assert db.recent_stage_events(source_id, limit=1)[0]["status"] == "canceled"
+    with db.session() as conn:
+        run = conn.execute(
+            "SELECT status FROM pipeline_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert run is not None
+    assert run["status"] == "canceled"
+
+
+def test_background_worker_ignores_late_cancel_after_successful_completion(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        f"""
+[[profiles]]
+name = "quant-books"
+source_paths = ["{tmp_path}"]
+file_types = ["pdf"]
+parser_mode = "marker"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=source.stat().st_size,
+        mtime=source.stat().st_mtime,
+        state=SourceState.NEW,
+    )
+    def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
+        return tmp_path / "book.md"
+
+    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+
+    with TestClient(
+        create_app(
+            profile_path=config,
+            db_factory=lambda: db,
+            worker_poll_interval=0.01,
+        )
+    ) as client:
+        client.app.state.queue.consume_cancel_request = lambda job_id: True
+        response = client.post(
+            "/api/jobs",
+            json={
+                "kind": "convert",
+                "source_file_id": source_id,
+                "profile_name": "quant-books",
+            },
+        )
+        assert response.status_code == 200
+        for _ in range(50):
+            job = db.list_jobs(limit=1)[0]
+            if job["status"] in {"completed", "canceled", "failed"}:
+                break
+            time.sleep(0.02)
+
+    job = db.list_jobs(limit=1)[0]
+    assert job["status"] == "completed"
+    assert db.recent_stage_events(source_id, limit=1)[0]["status"] == "completed"
+    with db.session() as conn:
+        run = conn.execute(
+            "SELECT status FROM pipeline_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert run is not None
+    assert run["status"] == "completed"
+
+
 def test_background_worker_does_not_block_api_while_conversion_runs(
     monkeypatch,
     tmp_path: Path,
@@ -1002,6 +1547,103 @@ def test_jobs_endpoint_includes_source_details_queue_position_and_stage(tmp_path
     assert jobs[1]["stage"]["status"] == "queued"
 
 
+def test_jobs_endpoint_includes_eta_wait_confidence_and_timing_basis(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    active_job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
+    queued_job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
+    captured_statuses: list[tuple[int, str]] = []
+    timing_context = object()
+    prepare_calls = 0
+
+    def fake_prepare_timing_context(actual_db):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        assert actual_db is db
+        return timing_context
+
+    def fake_estimate_job_timing(actual_db, job, source_row, now=None, timing_context=None):
+        captured_statuses.append((int(job["id"]), str(job["status"])))
+        assert actual_db is db
+        assert timing_context is timing_context_sentinel
+        if int(job["id"]) == active_job_id:
+            return {
+                "eta_seconds": 120,
+                "eta_label": "2m remaining",
+                "confidence": "live",
+                "timing_basis": "live_progress",
+            }
+        return {
+            "eta_seconds": 60,
+            "eta_label": "1m remaining",
+            "confidence": "low",
+            "timing_basis": "convert+book",
+        }
+
+    timing_context_sentinel = timing_context
+    monkeypatch.setattr(
+        rag_sync.api,
+        "prepare_timing_context",
+        fake_prepare_timing_context,
+        raising=False,
+    )
+    monkeypatch.setattr(rag_sync.api, "estimate_job_timing", fake_estimate_job_timing, raising=False)
+
+    with TestClient(create_app(db_factory=lambda: db, worker_enabled=False)) as client:
+        client.app.state.queue.current_job_id = active_job_id
+        client.app.state.queue.current_job = {
+            "id": active_job_id,
+            "kind": "sync_file",
+            "status": "queued",
+            "profile_name": "quant-books",
+            "source_file_id": source_id,
+            "progress": 0.25,
+            "error_summary": "",
+        }
+
+        response = client.get("/api/jobs")
+
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert jobs[0]["id"] == active_job_id
+    assert jobs[0]["status"] == "running"
+    assert jobs[0]["eta_seconds"] == 120
+    assert jobs[0]["eta_label"] == "2m remaining"
+    assert jobs[0]["wait_seconds"] == 0
+    assert jobs[0]["wait_label"] == "0s"
+    assert jobs[0]["confidence"] == "live"
+    assert jobs[0]["timing_basis"] == "live_progress"
+    assert "sample_size" not in jobs[0]
+    assert jobs[1]["id"] == queued_job_id
+    assert jobs[1]["eta_seconds"] == 60
+    assert jobs[1]["eta_label"] == "1m remaining"
+    assert jobs[1]["wait_seconds"] == 120
+    assert jobs[1]["wait_label"] == "2m"
+    assert jobs[1]["confidence"] == "low"
+    assert jobs[1]["timing_basis"] == "convert+book"
+    assert "sample_size" not in jobs[1]
+    assert prepare_calls == 1
+    assert captured_statuses == [
+        (active_job_id, "running"),
+        (queued_job_id, "queued"),
+    ]
+
+
 def test_jobs_endpoint_orders_running_first_then_queue_order(tmp_path: Path):
     source = tmp_path / "book.pdf"
     source.write_text("pdf", encoding="utf-8")
@@ -1066,6 +1708,176 @@ def test_status_endpoint_includes_active_stage_and_system_metrics(tmp_path: Path
     assert payload["system"]["gpu"]["label"] == "GPU 97%"
 
 
+def test_status_endpoint_does_not_count_superseded_failed_jobs(tmp_path: Path):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.PARSED,
+    )
+    failed_job_id = db.create_job(
+        "sync_file",
+        source_file_id=source_id,
+        profile_name="quant-books",
+    )
+    db.update_job_status(failed_job_id, "failed", error_summary="marker failed")
+    completed_job_id = db.create_job(
+        "sync_file",
+        source_file_id=source_id,
+        profile_name="quant-books",
+    )
+    db.update_job_status(completed_job_id, "completed", progress=1)
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queue"]["failed"] == 0
+    assert payload["queue"]["completed"] == 1
+    assert payload["label"] == "Idle"
+
+
+def test_status_endpoint_does_not_count_failed_job_for_already_parsed_source(tmp_path: Path):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.PARSED,
+    )
+    failed_job_id = db.create_job(
+        "sync_file",
+        source_file_id=source_id,
+        profile_name="quant-books",
+    )
+    db.update_job_status(failed_job_id, "failed", error_summary="old parser failure")
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queue"]["failed"] == 0
+    assert payload["label"] == "Idle"
+
+
+def test_status_endpoint_returns_queue_eta_payload(tmp_path: Path, monkeypatch):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    active_job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
+    queued_job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
+    captured_statuses: list[tuple[int, str]] = []
+    timing_context = object()
+    prepare_calls = 0
+
+    def fake_prepare_timing_context(actual_db):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        assert actual_db is db
+        return timing_context
+
+    def fake_estimate_job_timing(actual_db, job, source_row, now=None, timing_context=None):
+        assert actual_db is db
+        assert timing_context is timing_context_sentinel
+        return {
+            "eta_seconds": 120 if int(job["id"]) == active_job_id else 60,
+            "eta_label": "2m remaining" if int(job["id"]) == active_job_id else "1m remaining",
+            "confidence": "live" if int(job["id"]) == active_job_id else "low",
+            "timing_basis": "live_progress" if int(job["id"]) == active_job_id else "convert+book",
+        }
+
+    def fake_estimate_queue_timing(actual_db, jobs, files_by_id, now=None, timing_context=None):
+        assert actual_db is db
+        assert timing_context is timing_context_sentinel
+        captured_statuses.extend((int(job["id"]), str(job["status"])) for job in jobs)
+        return {
+            "seconds": 300,
+            "label": "5m remaining",
+            "confidence": "live",
+            "throughput_label": "recent median 1m/file",
+            "estimated_finish_at": "2026-06-26T10:05:00",
+        }
+
+    timing_context_sentinel = timing_context
+    monkeypatch.setattr(rag_sync.api, "read_system_metrics", lambda: {})
+    monkeypatch.setattr(
+        rag_sync.api,
+        "prepare_timing_context",
+        fake_prepare_timing_context,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        rag_sync.api,
+        "estimate_job_timing",
+        fake_estimate_job_timing,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        rag_sync.api,
+        "estimate_queue_timing",
+        fake_estimate_queue_timing,
+        raising=False,
+    )
+
+    with TestClient(create_app(db_factory=lambda: db, worker_enabled=False)) as client:
+        client.app.state.queue.current_job_id = active_job_id
+        client.app.state.queue.current_job = {
+            "id": active_job_id,
+            "kind": "sync_file",
+            "status": "queued",
+            "profile_name": "quant-books",
+            "source_file_id": source_id,
+            "progress": 0.25,
+            "error_summary": "",
+        }
+
+        response = client.get("/api/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queue_eta"] == {
+        "seconds": 300,
+        "label": "5m remaining",
+        "confidence": "live",
+        "throughput_label": "recent median 1m/file",
+        "estimated_finish_at": "2026-06-26T10:05:00",
+    }
+    assert "sample_size" not in payload["active"]
+    assert prepare_calls == 1
+    assert captured_statuses == [
+        (active_job_id, "running"),
+        (queued_job_id, "queued"),
+    ]
+
+
 def test_status_endpoint_finds_running_job_beyond_default_page_limit(
     tmp_path: Path,
     monkeypatch,
@@ -1102,23 +1914,230 @@ def test_status_endpoint_finds_running_job_beyond_default_page_limit(
     assert response.json()["active"]["file_name"] == "book.pdf"
 
 
+def test_status_endpoint_falls_back_to_runtime_active_job_when_db_has_none(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
+
+    monkeypatch.setattr(rag_sync.api, "read_system_metrics", lambda: {})
+    with TestClient(create_app(db_factory=lambda: db, worker_enabled=False)) as client:
+        client.app.state.queue.current_job_id = job_id
+        client.app.state.queue.current_job = {
+            "id": job_id,
+            "kind": "sync_file",
+            "status": "queued",
+            "profile_name": "quant-books",
+            "source_file_id": source_id,
+            "progress": 0.0,
+            "error_summary": "",
+        }
+
+        response = client.get("/api/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["label"] == "1 active · 0 queued"
+    assert payload["queue"]["running"] == 1
+    assert payload["queue"]["queued"] == 0
+    assert payload["active"]["id"] == job_id
+    assert payload["active"]["file_name"] == "book.pdf"
+    assert payload["active"]["status"] == "running"
+
+
+def test_jobs_endpoint_overrides_runtime_active_job_when_db_row_is_not_running(tmp_path: Path):
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    active_job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
+    queued_job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
+
+    with TestClient(create_app(db_factory=lambda: db, worker_enabled=False)) as client:
+        client.app.state.queue.current_job_id = active_job_id
+        client.app.state.queue.current_job = {
+            "id": active_job_id,
+            "kind": "sync_file",
+            "status": "queued",
+            "profile_name": "quant-books",
+            "source_file_id": source_id,
+            "progress": 0.0,
+            "error_summary": "",
+        }
+
+        response = client.get("/api/jobs")
+
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert jobs[0]["id"] == active_job_id
+    assert jobs[0]["status"] == "running"
+    assert jobs[0]["queue_position"] == 0
+    assert jobs[1]["id"] == queued_job_id
+    assert jobs[1]["status"] == "queued"
+    assert jobs[1]["queue_position"] == 1
+
+
 def test_queue_pause_and_resume_endpoints_update_status(tmp_path: Path):
     db = RagSyncDb(tmp_path / "state.sqlite")
     db.migrate()
-    with TestClient(create_app(db_factory=lambda: db)) as client:
-        pause = client.post("/api/queue/pause")
-        paused_status = client.get("/api/status")
-        resume = client.post("/api/queue/resume")
-        resumed_status = client.get("/api/status")
+    log_path = tmp_path / "rag-sync.log"
+    ldd.set_log_path_for_tests(log_path)
+    try:
+        with TestClient(create_app(db_factory=lambda: db)) as client:
+            pause = client.post("/api/queue/pause")
+            paused_status = client.get("/api/status")
+            resume = client.post("/api/queue/resume")
+            resumed_status = client.get("/api/status")
 
-        assert pause.status_code == 200
-        assert pause.json() == {"paused": True}
-        assert paused_status.status_code == 200
-        assert paused_status.json()["queue"]["paused"] is True
-        assert resume.status_code == 200
-        assert resume.json() == {"paused": False}
-        assert resumed_status.status_code == 200
-        assert resumed_status.json()["queue"]["paused"] is False
+            assert pause.status_code == 200
+            assert pause.json() == {"paused": True}
+            assert paused_status.status_code == 200
+            assert paused_status.json()["queue"]["paused"] is True
+            assert resume.status_code == 200
+            assert resume.json() == {"paused": False}
+            assert resumed_status.status_code == 200
+            assert resumed_status.json()["queue"]["paused"] is False
+    finally:
+        ldd.set_log_path_for_tests(None)
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert any(record["event"] == "app.lifecycle.started" for record in records)
+    assert any(record["event"] == "queue.paused" for record in records)
+    assert any(record["event"] == "queue.resumed" for record in records)
+    assert any(record["event"] == "app.lifecycle.stopped" for record in records)
+
+
+def test_worker_loop_recovers_when_run_next_raises(tmp_path: Path, monkeypatch):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    job_id = db.create_job(
+        "sync_file",
+        source_file_id=source_id,
+        profile_name="quant-books",
+    )
+    calls = 0
+
+    async def flaky_run_next(self):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("worker iteration blew up")
+        if calls == 2:
+            self.db.update_job_status(job_id, "completed", progress=1)
+            return True
+        return False
+
+    monkeypatch.setattr(rag_sync.queue.PersistentJobQueue, "run_next", flaky_run_next)
+
+    with TestClient(create_app(db_factory=lambda: db, worker_poll_interval=0.01)):
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            with db.connect() as conn:
+                row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is not None and row["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+
+    assert row is not None
+    assert row["status"] == "completed"
+    assert calls >= 2
+
+
+def test_queue_resume_restarts_worker_when_task_has_stopped(tmp_path: Path, monkeypatch):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+
+    with TestClient(create_app(db_factory=lambda: db, worker_poll_interval=0.01)) as client:
+        client.app.state.worker_stop_event.set()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if client.app.state.worker_task.done():
+                break
+            time.sleep(0.02)
+
+        job_id = db.create_job(
+            "sync_file",
+            source_file_id=source_id,
+            profile_name="quant-books",
+        )
+
+        async def finish_job_once(self):
+            queued = self.db.next_queued_job()
+            if queued is None:
+                return False
+            self.db.update_job_status(int(queued["id"]), "completed", progress=1)
+            return True
+
+        monkeypatch.setattr(rag_sync.queue.PersistentJobQueue, "run_next", finish_job_once)
+
+        response = client.post("/api/queue/resume")
+
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            with db.connect() as conn:
+                row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is not None and row["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+
+    assert response.status_code == 200
+    assert response.json() == {"paused": False}
+    assert row is not None
+    assert row["status"] == "completed"
 
 
 def test_queue_kill_endpoint_pauses_queue_and_requests_cancel(tmp_path: Path, monkeypatch):
@@ -1143,11 +2162,15 @@ def test_queue_kill_endpoint_pauses_queue_and_requests_cancel(tmp_path: Path, mo
     )
     db.update_job_status(running_job_id, "running", progress=0.1)
     monkeypatch.setattr(rag_sync.api, "terminate_active_parser_processes", lambda: 1)
-
-    with TestClient(create_app(db_factory=lambda: db)) as client:
-        client.app.state.queue.current_job_id = running_job_id
-        response = client.post("/api/queue/kill")
-        status = client.get("/api/status")
+    log_path = tmp_path / "rag-sync.log"
+    ldd.set_log_path_for_tests(log_path)
+    try:
+        with TestClient(create_app(db_factory=lambda: db, worker_enabled=False)) as client:
+            client.app.state.queue.current_job_id = running_job_id
+            response = client.post("/api/queue/kill")
+            status = client.get("/api/status")
+    finally:
+        ldd.set_log_path_for_tests(None)
 
     assert response.status_code == 200
     assert response.json() == {
@@ -1156,3 +2179,49 @@ def test_queue_kill_endpoint_pauses_queue_and_requests_cancel(tmp_path: Path, mo
         "terminated_processes": 1,
     }
     assert status.json()["queue"]["paused"] is True
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    kill_events = [record for record in records if record["event"] == "queue.kill_requested"]
+    assert kill_events
+    assert kill_events[-1]["canceled_running_job"] is True
+    assert kill_events[-1]["terminated_processes"] == 1
+
+
+def test_app_startup_skips_requeue_when_worker_lock_is_already_held(tmp_path: Path):
+    db_path = tmp_path / "state.sqlite"
+    owner_db = RagSyncDb(db_path)
+    owner_db.migrate()
+    source = tmp_path / "book.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    source_id = owner_db.upsert_source_file(
+        profile_name="quant-books",
+        source_path=str(source),
+        source_type="book",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.NEW,
+    )
+    running_job_id = owner_db.create_job(
+        "sync_file",
+        source_file_id=source_id,
+        profile_name="quant-books",
+    )
+    owner_db.update_job_status(running_job_id, "running", progress=0.25)
+    assert owner_db.acquire_worker_lock("already-running-worker") is True
+
+    app_db = RagSyncDb(db_path)
+    with TestClient(create_app(db_factory=lambda: app_db)) as client:
+        assert client.app.state.worker_lock_acquired is False
+        with app_db.connect() as conn:
+            row = conn.execute(
+                "SELECT status, started_at, error_summary FROM jobs WHERE id = ?",
+                (running_job_id,),
+            ).fetchone()
+
+    owner_db.release_worker_lock("already-running-worker")
+
+    assert row is not None
+    assert row["status"] == "running"
+    assert row["started_at"] is not None
+    assert row["error_summary"] == ""

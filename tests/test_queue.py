@@ -1,6 +1,8 @@
 import asyncio
+import json
 from pathlib import Path
 
+from rag_sync import ldd
 from rag_sync.db import RagSyncDb
 from rag_sync.models import JobKind, SourceState
 from rag_sync.queue import PersistentJobQueue
@@ -68,6 +70,36 @@ def test_run_next_executes_registered_handler_and_records_status(project_tmp: Pa
     assert calls == [job_id]
     assert row["status"] == "completed"
     assert row["progress"] == 1
+
+
+def test_queue_writes_structured_job_state_logs(project_tmp: Path):
+    log_path = project_tmp / "rag-sync.log"
+    ldd.set_log_path_for_tests(log_path)
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    queue = PersistentJobQueue(db)
+    source_id = _add_source(db, project_tmp)
+
+    async def handler(job):
+        return {"ok": True}
+
+    queue.register(JobKind.CONVERT, handler)
+    try:
+        job_id = queue.enqueue(
+            kind=JobKind.CONVERT,
+            source_file_id=source_id,
+            profile_name="quant-books",
+        )
+        asyncio.run(queue.run_next())
+    finally:
+        ldd.set_log_path_for_tests(None)
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = [record["event"] for record in records]
+    assert events == ["job.queued", "job.running", "job.completed"]
+    assert all(record["job_id"] == job_id for record in records)
+    assert all(record["source_file_id"] == source_id for record in records)
+    assert records[-1]["status"] == "ok"
 
 
 def test_run_next_marks_handler_error_failed(project_tmp: Path):

@@ -8,6 +8,7 @@ from typing import Any
 
 from rag_sync.config import DEFAULT_DATA_DIR, DEFAULT_PROFILE_PATH, load_profiles
 from rag_sync.db import RagSyncDb
+from rag_sync.ldd import log_event
 from rag_sync.models import ParserMode, Profile, SourceState
 from rag_sync.parsers import MarkerParser, MinerUParser, PassthroughParser
 from rag_sync.quality import check_markdown_quality
@@ -65,6 +66,116 @@ def _chosen_parser_name(row: dict[str, Any], profile: Profile, parser_name: str 
     return profile.parser_mode.value
 
 
+def _supports_marker_fallback(row: dict[str, Any], parser_name: str) -> bool:
+    if parser_name != ParserMode.MARKER.value:
+        return False
+    if str(row["extension"]).lower().lstrip(".") != "pdf":
+        return False
+    return str(row["source_type"]).lower() in {"book", "paper"}
+
+
+def _convert_with_parser(
+    db: RagSyncDb,
+    row: dict[str, Any],
+    source_path: Path,
+    parser_name: str,
+    profile: Profile,
+) -> Path:
+    output_path = output_path_for(profile, source_path, parser_name)
+    parser = _parser_for_name(parser_name)
+    log_event(
+        "conversion.started",
+        "ok",
+        source_file_id=int(row["id"]),
+        profile_name=str(row["profile_name"]),
+        source_type=str(row["source_type"]),
+        source_path=str(source_path),
+        parser=parser_name,
+        output_path=str(output_path),
+    )
+    try:
+        result = parser.convert(
+            source_path=source_path,
+            output_path=output_path,
+            source_type=str(row["source_type"]),
+            sha256=str(row["sha256"]),
+        )
+    except Exception as exc:
+        log_event(
+            "conversion.failed",
+            "error",
+            source_file_id=int(row["id"]),
+            profile_name=str(row["profile_name"]),
+            source_type=str(row["source_type"]),
+            source_path=str(source_path),
+            parser=parser_name,
+            output_path=str(output_path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
+    math_heavy = str(row["source_type"]).lower() in {"book", "paper"}
+    quality = check_markdown_quality(result.output_path, math_heavy=math_heavy)
+    output_bytes = result.output_path.stat().st_size if result.output_path.exists() else 0
+    log_event(
+        "conversion.quality.checked",
+        "error" if quality.status == "blocked" else "ok",
+        source_file_id=int(row["id"]),
+        profile_name=str(row["profile_name"]),
+        source_type=str(row["source_type"]),
+        source_path=str(source_path),
+        parser=result.parser,
+        output_path=str(result.output_path),
+        output_bytes=output_bytes,
+        quality_status=quality.status,
+        warnings=quality.warnings,
+    )
+    db.add_artifact(
+        source_file_id=int(row["id"]),
+        parser=result.parser,
+        output_path=str(result.output_path),
+        output_sha256=sha256_file(result.output_path),
+        quality_status=quality.status,
+        warnings_json=json.dumps(quality.warnings),
+    )
+    if quality.status == "blocked":
+        db.update_source_state(int(row["id"]), SourceState.FAILED)
+        error = (
+            f"Conversion quality check blocked source file {row['id']}: "
+            f"{'; '.join(quality.warnings)}"
+        )
+        log_event(
+            "conversion.failed",
+            "error",
+            source_file_id=int(row["id"]),
+            profile_name=str(row["profile_name"]),
+            source_type=str(row["source_type"]),
+            source_path=str(source_path),
+            parser=result.parser,
+            output_path=str(result.output_path),
+            output_bytes=output_bytes,
+            quality_status=quality.status,
+            warnings=quality.warnings,
+            error_type="RuntimeError",
+            error=error,
+        )
+        raise RuntimeError(error)
+    log_event(
+        "conversion.completed",
+        "ok",
+        source_file_id=int(row["id"]),
+        profile_name=str(row["profile_name"]),
+        source_type=str(row["source_type"]),
+        source_path=str(source_path),
+        parser=result.parser,
+        output_path=str(result.output_path),
+        output_bytes=output_bytes,
+        quality_status=quality.status,
+        warnings=quality.warnings,
+    )
+    return result.output_path
+
+
 def persist_scan(db: RagSyncDb, profile: Profile) -> list[int]:
     existing = db.existing_hashes(profile.name)
     results = scan_profile(profile, existing_hashes=existing)
@@ -81,6 +192,8 @@ def persist_scan(db: RagSyncDb, profile: Profile) -> list[int]:
                 size_bytes=result.size_bytes,
                 mtime=result.mtime,
                 state=SourceState(result.state),
+                page_count=result.page_count,
+                pdf_producer=result.pdf_producer,
             )
         )
     db.mark_missing_absent_paths(profile.name, seen_paths)
@@ -97,32 +210,50 @@ def convert_source_file(
     profile = _profile_by_name(str(row["profile_name"]), profile_path)
     source_path = Path(str(row["source_path"]))
     chosen_parser = _chosen_parser_name(row, profile, parser_name)
-    output_path = output_path_for(profile, source_path, chosen_parser)
-
-    parser = _parser_for_name(chosen_parser)
-    result = parser.convert(
-        source_path=source_path,
-        output_path=output_path,
-        source_type=str(row["source_type"]),
-        sha256=str(row["sha256"]),
-    )
-    math_heavy = str(row["source_type"]).lower() in {"book", "paper"}
-    quality = check_markdown_quality(result.output_path, math_heavy=math_heavy)
-    db.add_artifact(
-        source_file_id=source_file_id,
-        parser=result.parser,
-        output_path=str(result.output_path),
-        output_sha256=sha256_file(result.output_path),
-        quality_status=quality.status,
-        warnings_json=json.dumps(quality.warnings),
-    )
-    if quality.status == "blocked":
-        db.update_source_state(source_file_id, SourceState.FAILED)
-        raise RuntimeError(
-            f"Conversion quality check blocked source file {source_file_id}: "
-            f"{'; '.join(quality.warnings)}"
+    try:
+        return _convert_with_parser(db, row, source_path, chosen_parser, profile)
+    except RuntimeError as exc:
+        if parser_name is not None or not _supports_marker_fallback(row, chosen_parser):
+            raise
+        log_event(
+            "conversion.fallback.started",
+            "ok",
+            source_file_id=int(row["id"]),
+            profile_name=str(row["profile_name"]),
+            source_type=str(row["source_type"]),
+            source_path=str(source_path),
+            from_parser=chosen_parser,
+            to_parser=ParserMode.MINERU.value,
+            reason=str(exc),
         )
-    return result.output_path
+    try:
+        output_path = _convert_with_parser(db, row, source_path, ParserMode.MINERU.value, profile)
+    except Exception as fallback_exc:
+        log_event(
+            "conversion.fallback.failed",
+            "error",
+            source_file_id=int(row["id"]),
+            profile_name=str(row["profile_name"]),
+            source_type=str(row["source_type"]),
+            source_path=str(source_path),
+            from_parser=chosen_parser,
+            to_parser=ParserMode.MINERU.value,
+            error_type=type(fallback_exc).__name__,
+            error=str(fallback_exc),
+        )
+        raise
+    log_event(
+        "conversion.fallback.completed",
+        "ok",
+        source_file_id=int(row["id"]),
+        profile_name=str(row["profile_name"]),
+        source_type=str(row["source_type"]),
+        source_path=str(source_path),
+        from_parser=chosen_parser,
+        to_parser=ParserMode.MINERU.value,
+        output_path=str(output_path),
+    )
+    return output_path
 
 
 def _required_id(payload: dict[str, Any], primary: str, fallback: str, kind: str) -> str:
@@ -196,15 +327,7 @@ async def parse_uploaded_document(
             SET parse_status = ?, last_synced_at = CURRENT_TIMESTAMP
             WHERE source_file_id = ?
             """,
-            ("parsed", source_file_id),
-        )
-        conn.execute(
-            """
-            UPDATE source_files
-            SET state = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (SourceState.PARSED.value, source_file_id),
+            ("parsing", source_file_id),
         )
     return response
 
