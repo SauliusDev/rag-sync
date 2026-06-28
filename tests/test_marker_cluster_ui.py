@@ -58,6 +58,10 @@ def test_cluster_ui_runner_prints_summary(
         "profile": "quant-books",
         "tags": ("gpu", "nightly"),
         "marker_bin": "/opt/marker/bin/marker",
+        "parallel_files": 1,
+        "marker_workers": 1,
+        "gpu_devices": (),
+        "timeout_seconds": 0,
     }
     assert "batch-1" in output
     assert "success_count" in output

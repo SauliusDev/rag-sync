@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import shutil
@@ -17,7 +18,7 @@ from rag_sync.ldd import log_event_to_path
 from rag_sync.parsers import build_marker_command, _should_disable_marker_ocr_for_pdf
 from rag_sync.scanner import pdf_metadata, sha256_file
 
-MARKER_BATCH_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "1200"))
+MARKER_BATCH_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "0"))
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,9 @@ def run_marker_for_file(
     work_dir: Path,
     markdown_path: Path,
     marker_bin: str = "marker",
+    marker_workers: int = 1,
+    gpu_device: str | None = None,
+    timeout_seconds: int = MARKER_BATCH_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
     if work_dir.exists():
         shutil.rmtree(work_dir)
@@ -54,8 +58,12 @@ def run_marker_for_file(
         staged_input_dir,
         raw_output_path,
         disable_ocr=disable_ocr,
+        workers=marker_workers,
     )
     command[0] = marker_bin
+    env = os.environ.copy()
+    if gpu_device is not None:
+        env["CUDA_VISIBLE_DEVICES"] = gpu_device
 
     started = time.monotonic()
     proc = subprocess.Popen(
@@ -64,14 +72,18 @@ def run_marker_for_file(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        env=env,
     )
     try:
         try:
-            stdout, stderr = proc.communicate(timeout=MARKER_BATCH_TIMEOUT_SECONDS)
+            if timeout_seconds > 0:
+                stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            else:
+                stdout, stderr = proc.communicate()
         except subprocess.TimeoutExpired as exc:
             with suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGTERM)
-            raise RuntimeError(f"marker timed out after {MARKER_BATCH_TIMEOUT_SECONDS}s") from exc
+            raise RuntimeError(f"marker timed out after {timeout_seconds}s") from exc
     finally:
         duration_seconds = time.monotonic() - started
 
@@ -93,6 +105,7 @@ def run_marker_for_file(
         "duration_seconds": duration_seconds,
         "stdout": stdout,
         "stderr": stderr,
+        "gpu_device": gpu_device,
     }
 
 
@@ -103,12 +116,22 @@ def run_batch(
     profile: str,
     tags: tuple[str, ...] = (),
     marker_bin: str = "marker",
+    parallel_files: int = 1,
+    marker_workers: int = 1,
+    gpu_devices: tuple[str, ...] = (),
+    timeout_seconds: int = MARKER_BATCH_TIMEOUT_SECONDS,
 ) -> BatchRunResult:
     input_dir = input_dir.resolve()
     if not input_dir.exists():
         raise ValueError(f"input directory does not exist: {input_dir}")
     if not input_dir.is_dir():
         raise ValueError(f"input path is not a directory: {input_dir}")
+    if parallel_files < 1:
+        raise ValueError("parallel_files must be at least 1")
+    if marker_workers < 1:
+        raise ValueError("marker_workers must be at least 1")
+    if timeout_seconds < 0:
+        raise ValueError("timeout_seconds must be at least 0")
 
     batch_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     created_at = datetime.now(UTC).isoformat(timespec="seconds")
@@ -129,13 +152,17 @@ def run_batch(
         input_dir=str(input_dir),
         output_dir=str(output_dir),
         file_count=len(pdf_paths),
+        parallel_files=parallel_files,
+        marker_workers=marker_workers,
+        gpu_devices=list(gpu_devices),
+        timeout_seconds=timeout_seconds,
     )
 
-    manifest_records: list[dict[str, object]] = []
+    manifest_records: list[dict[str, object] | None] = [None] * len(pdf_paths)
     success_count = 0
     failure_count = 0
 
-    for pdf_path in pdf_paths:
+    def process_pdf(index: int, pdf_path: Path) -> tuple[int, dict[str, object], bool]:
         started_at = datetime.now(UTC)
         source_relpath = pdf_path.relative_to(input_dir)
         source_stat = pdf_path.stat()
@@ -150,6 +177,7 @@ def run_batch(
         }
         markdown_path = output_dir / "outputs" / source_relpath.with_suffix(".md")
         work_dir = output_dir / ".work" / source_relpath.with_suffix("")
+        gpu_device = gpu_devices[index % len(gpu_devices)] if gpu_devices else None
         log_event_to_path(
             log_path,
             "file.convert.started",
@@ -157,6 +185,7 @@ def run_batch(
             batch_id=batch_id,
             source_relpath=source_info["source_relpath"],
             source_path=str(pdf_path),
+            gpu_device=gpu_device,
         )
 
         try:
@@ -166,18 +195,21 @@ def run_batch(
                 work_dir=work_dir,
                 markdown_path=markdown_path,
                 marker_bin=marker_bin,
+                marker_workers=marker_workers,
+                gpu_device=gpu_device,
+                timeout_seconds=timeout_seconds,
             )
             markdown_path = Path(str(result["markdown_path"]))
             returncode = int(result.get("returncode", 1))
             duration_seconds = float(result.get("duration_seconds", 0.0))
             finished_at = started_at.timestamp() + duration_seconds
-            if returncode == 0 and markdown_path.exists():
+            succeeded = returncode == 0 and markdown_path.exists()
+            if succeeded:
                 markdown_sha256 = sha256_file(markdown_path)
                 markdown_size_bytes = markdown_path.stat().st_size
                 status = "ok"
                 error_type = None
                 error_message = None
-                success_count += 1
                 log_event_to_path(
                     log_path,
                     "file.convert.finished",
@@ -187,6 +219,7 @@ def run_batch(
                     markdown_relpath=str(markdown_path.relative_to(output_dir)),
                     returncode=returncode,
                     duration_seconds=duration_seconds,
+                    gpu_device=gpu_device,
                 )
             else:
                 markdown_sha256 = "missing"
@@ -194,7 +227,6 @@ def run_batch(
                 status = "error"
                 error_type = "marker_failed"
                 error_message = str(result.get("stderr", ""))[-1000:] or "marker failed"
-                failure_count += 1
                 log_event_to_path(
                     log_path,
                     "file.convert.failed",
@@ -205,6 +237,7 @@ def run_batch(
                     duration_seconds=duration_seconds,
                     error_type=error_type,
                     error_message=error_message,
+                    gpu_device=gpu_device,
                 )
         except Exception as exc:
             returncode = None
@@ -215,7 +248,7 @@ def run_batch(
             status = "error"
             error_type = type(exc).__name__
             error_message = str(exc)
-            failure_count += 1
+            succeeded = False
             log_event_to_path(
                 log_path,
                 "file.convert.failed",
@@ -225,9 +258,10 @@ def run_batch(
                 duration_seconds=duration_seconds,
                 error_type=error_type,
                 error_message=error_message,
+                gpu_device=gpu_device,
             )
 
-        manifest_records.append(
+        return index, (
             {
                 **source_info,
                 "markdown_relpath": str(markdown_path.relative_to(output_dir)),
@@ -242,8 +276,22 @@ def run_batch(
                 "returncode": returncode,
                 "error_type": error_type,
                 "error_message": error_message,
+                "gpu_device": gpu_device,
             }
-        )
+        ), succeeded
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_files) as executor:
+        futures = [
+            executor.submit(process_pdf, index, pdf_path)
+            for index, pdf_path in enumerate(pdf_paths)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            index, record, succeeded = future.result()
+            manifest_records[index] = record
+            if succeeded:
+                success_count += 1
+            else:
+                failure_count += 1
 
     manifest = {
         "batch_id": batch_id,
@@ -259,8 +307,11 @@ def run_batch(
             "--disable_ocr",
             "--disable_image_extraction",
             "--workers",
-            "1",
+            str(marker_workers),
         ],
+        "parallel_files": parallel_files,
+        "gpu_devices": list(gpu_devices),
+        "timeout_seconds": timeout_seconds,
         "files": manifest_records,
     }
     manifest_path = output_dir / "manifest.json"

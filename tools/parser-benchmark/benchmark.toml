@@ -1,0 +1,49 @@
+[benchmark]
+monitor_interval_seconds = 5
+log_path = "logs/parser-benchmark.jsonl"
+
+[parsers.marker]
+enabled = true
+bin = ".venvs/marker/bin/marker"
+timeout_seconds = 1200
+disable_ocr = true
+workers = 1
+
+[parsers.mineru]
+enabled = true
+bin = ".venvs/mineru/bin/mineru"
+timeout_seconds = 2400
+backend = "hybrid-engine"
+effort = "high"
+extra_args = []
+
+[parsers.mineru.env]
+CUDA_VISIBLE_DEVICES = "1"
+VLLM_USE_V1 = "1"
+VLLM_USE_FLASHINFER_SAMPLER = "0"
+
+[parsers.paddleocr_vl]
+enabled = true
+bin = ".venvs/paddleocr/bin/paddleocr"
+timeout_seconds = 2400
+pipeline_version = "v1.5"
+device = "gpu"
+engine = ""
+vl_rec_backend = ""
+vl_rec_server_url = ""
+vl_rec_api_model_name = ""
+vl_rec_api_key = ""
+extra_args = []
+
+[parsers.glmocr]
+enabled = true
+bin = ".venvs/glmocr/bin/glmocr"
+timeout_seconds = 2400
+config_path = ""
+layout_device = ""
+extra_args = []
+
+[parsers.glmocr.env]
+CUDA_VISIBLE_DEVICES = "0"
+VLLM_USE_V1 = "1"
+VLLM_USE_FLASHINFER_SAMPLER = "0"

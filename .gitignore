@@ -1,4 +1,6 @@
 .venv/
+.env
+.ipynb_checkpoints/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -7,3 +9,13 @@ data/
 web/node_modules/
 web/dist/
 .superpowers/
+_experiments/
+_marker-in/
+_marker-retry/
+_marker_export.tar.gz
+_marker_export/
+_marker_out/
+_marker_out_retry/
+_retry_lab/
+_visual_audit_prep_trial/
+tools/parser-benchmark/.venvs/

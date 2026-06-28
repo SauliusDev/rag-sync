@@ -251,6 +251,7 @@ def test_run_marker_for_file_enforces_timeout_and_cleans_up_process(
             work_dir=tmp_path / "work",
             markdown_path=tmp_path / "batch" / "outputs" / "Book.md",
             marker_bin="marker",
+            timeout_seconds=1,
         )
 
     assert killed == [(123, 15)]

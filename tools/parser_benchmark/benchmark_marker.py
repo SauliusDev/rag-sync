@@ -183,7 +183,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def _default_marker_bin() -> str:
     if LOCAL_MARKER_BIN.exists():
         return str(LOCAL_MARKER_BIN)
-    return shutil.which("marker") or "marker"
+    return shutil.which("marker") or str(LOCAL_MARKER_BIN)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

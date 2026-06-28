@@ -4,8 +4,10 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -155,6 +157,31 @@ def terminate_active_parser_processes() -> int:
     return terminated
 
 
+def _adjacent_tool_path(tool_name: str) -> Path:
+    return Path(sys.executable).parent / tool_name
+
+
+def resolve_marker_bin() -> str:
+    adjacent = _adjacent_tool_path("marker")
+    if adjacent.exists():
+        return str(adjacent)
+    return MARKER_BIN if Path(MARKER_BIN).exists() else shutil.which("marker") or "marker"
+
+
+def resolve_mineru_bin() -> str:
+    adjacent = _adjacent_tool_path("mineru")
+    if adjacent.exists():
+        return str(adjacent)
+    return MINERU_BIN if Path(MINERU_BIN).exists() else shutil.which("mineru") or "mineru"
+
+
+def mineru_available() -> bool:
+    mineru_bin = resolve_mineru_bin()
+    if mineru_bin == "mineru":
+        return shutil.which("mineru") is not None
+    return Path(mineru_bin).exists()
+
+
 def _run_parser_command(
     cmd: list[str],
     *,
@@ -288,8 +315,11 @@ def build_marker_command(
     output_path: Path,
     *,
     disable_ocr: bool = True,
+    workers: int = 1,
+    low_memory_ocr: bool | None = None,
+    extra_args: Sequence[str] = (),
 ) -> list[str]:
-    marker_bin = MARKER_BIN if Path(MARKER_BIN).exists() else shutil.which("marker") or "marker"
+    marker_bin = resolve_marker_bin()
     command = [
         marker_bin,
         str(source_path),
@@ -299,11 +329,11 @@ def build_marker_command(
         "markdown",
         "--disable_image_extraction",
         "--workers",
-        "1",
+        str(workers),
     ]
     if disable_ocr:
         command.insert(6, "--disable_ocr")
-    elif MARKER_LOW_MEMORY_OCR:
+    elif MARKER_LOW_MEMORY_OCR if low_memory_ocr is None else low_memory_ocr:
         command.extend(
             [
                 "--disable_multiprocessing",
@@ -324,7 +354,150 @@ def build_marker_command(
                 "--drop_repeated_text",
             ]
         )
+    command.extend(str(item) for item in extra_args)
     return command
+
+
+def build_mineru_command(
+    source_path: Path,
+    output_path: Path,
+    *,
+    method: str = "txt",
+    backend: str = "pipeline",
+    extra_args: Sequence[str] = (),
+) -> list[str]:
+    mineru_bin = resolve_mineru_bin()
+    command = [
+        mineru_bin,
+        "--path",
+        str(source_path),
+        "--output",
+        str(output_path.parent),
+        "--backend",
+        backend,
+        "--method",
+        method,
+        "--formula",
+        "true",
+        "--table",
+        "true",
+    ]
+    command.extend(str(item) for item in extra_args)
+    return command
+
+
+def convert_with_marker(
+    *,
+    source_path: Path,
+    output_path: Path,
+    source_type: str,
+    sha256: str,
+    pdf_producer: str = "",
+    disable_ocr: bool | None = None,
+    workers: int = 1,
+    low_memory_ocr: bool | None = None,
+    extra_args: Sequence[str] = (),
+    timeout_seconds: int = MARKER_TIMEOUT_SECONDS,
+) -> ParserResult:
+    parser_name = "marker"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_dir = _prepare_raw_output_dir(output_path, parser_name)
+    input_dir = raw_dir / ".input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, input_dir / source_path.name)
+    raw_output_path = raw_dir / output_path.name
+    chosen_disable_ocr = disable_ocr
+    if chosen_disable_ocr is None:
+        chosen_disable_ocr = True
+        if source_path.suffix.lower() == ".pdf":
+            chosen_disable_ocr = _should_disable_marker_ocr_for_pdf(
+                source_path=source_path,
+                pdf_producer=pdf_producer,
+            )
+    cmd = build_marker_command(
+        input_dir,
+        raw_output_path,
+        disable_ocr=chosen_disable_ocr,
+        workers=workers,
+        low_memory_ocr=low_memory_ocr,
+        extra_args=extra_args,
+    )
+    proc = _run_parser_command(
+        cmd,
+        parser_name=parser_name,
+        timeout_seconds=timeout_seconds,
+    )
+    if proc.returncode != 0:
+        log_event(
+            "parser.failed",
+            "error",
+            parser=parser_name,
+            source_path=str(source_path),
+            output_path=str(output_path),
+            raw_dir=str(raw_dir),
+            returncode=proc.returncode,
+            stderr_tail=proc.stderr[-1000:],
+        )
+        raise RuntimeError(f"marker failed for {source_path}: {proc.stderr[-1000:]}")
+    try:
+        raw = _single_markdown_output(raw_dir, parser_name, source_path)
+    except RuntimeError:
+        log_event(
+            "parser.failed",
+            "error",
+            parser=parser_name,
+            source_path=str(source_path),
+            output_path=str(output_path),
+            raw_dir=str(raw_dir),
+            returncode=proc.returncode,
+            stderr_tail=proc.stderr[-2000:],
+        )
+        raise
+    _wrap_parser_output(raw, source_path, output_path, source_type, parser_name, sha256)
+    return ParserResult(parser_name, output_path, proc.stdout, proc.stderr)
+
+
+def convert_with_mineru(
+    *,
+    source_path: Path,
+    output_path: Path,
+    source_type: str,
+    sha256: str,
+    method: str = "txt",
+    backend: str = "pipeline",
+    extra_args: Sequence[str] = (),
+    timeout_seconds: int = MINERU_TIMEOUT_SECONDS,
+) -> ParserResult:
+    parser_name = "mineru"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_dir = _prepare_raw_output_dir(output_path, parser_name)
+    cmd = build_mineru_command(
+        source_path,
+        raw_dir / output_path.name,
+        method=method,
+        backend=backend,
+        extra_args=extra_args,
+    )
+    proc = _run_parser_command(
+        cmd,
+        parser_name=parser_name,
+        timeout_seconds=timeout_seconds,
+    )
+    if proc.returncode != 0:
+        log_event(
+            "parser.failed",
+            "error",
+            parser=parser_name,
+            source_path=str(source_path),
+            output_path=str(output_path),
+            raw_dir=str(raw_dir),
+            returncode=proc.returncode,
+            stderr_tail=proc.stderr[-1000:],
+        )
+        raise RuntimeError(f"mineru failed for {source_path}: {proc.stderr[-1000:]}")
+    raw = _single_markdown_output(raw_dir, parser_name, source_path)
+    _wrap_parser_output(raw, source_path, output_path, source_type, parser_name, sha256)
+    return ParserResult(parser_name, output_path, proc.stdout, proc.stderr)
 
 
 class MarkerParser:
@@ -338,52 +511,14 @@ class MarkerParser:
         sha256: str,
         pdf_producer: str = "",
     ) -> ParserResult:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        raw_dir = _prepare_raw_output_dir(output_path, self.name)
-        input_dir = raw_dir / ".input"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, input_dir / source_path.name)
-        raw_output_path = raw_dir / output_path.name
-        disable_ocr = True
-        if source_path.suffix.lower() == ".pdf":
-            disable_ocr = _should_disable_marker_ocr_for_pdf(
-                source_path=source_path,
-                pdf_producer=pdf_producer,
-            )
-        cmd = build_marker_command(input_dir, raw_output_path, disable_ocr=disable_ocr)
-        proc = _run_parser_command(
-            cmd,
-            parser_name=self.name,
+        return convert_with_marker(
+            source_path=source_path,
+            output_path=output_path,
+            source_type=source_type,
+            sha256=sha256,
+            pdf_producer=pdf_producer,
             timeout_seconds=MARKER_TIMEOUT_SECONDS,
         )
-        if proc.returncode != 0:
-            log_event(
-                "parser.failed",
-                "error",
-                parser=self.name,
-                source_path=str(source_path),
-                output_path=str(output_path),
-                raw_dir=str(raw_dir),
-                returncode=proc.returncode,
-                stderr_tail=proc.stderr[-1000:],
-            )
-            raise RuntimeError(f"marker failed for {source_path}: {proc.stderr[-1000:]}")
-        try:
-            raw = _single_markdown_output(raw_dir, self.name, source_path)
-        except RuntimeError:
-            log_event(
-                "parser.failed",
-                "error",
-                parser=self.name,
-                source_path=str(source_path),
-                output_path=str(output_path),
-                raw_dir=str(raw_dir),
-                returncode=proc.returncode,
-                stderr_tail=proc.stderr[-2000:],
-            )
-            raise
-        _wrap_parser_output(raw, source_path, output_path, source_type, self.name, sha256)
-        return ParserResult(self.name, output_path, proc.stdout, proc.stderr)
 
 
 class MinerUParser:
@@ -397,41 +532,10 @@ class MinerUParser:
         sha256: str,
         pdf_producer: str = "",
     ) -> ParserResult:
-        mineru_bin = MINERU_BIN if Path(MINERU_BIN).exists() else shutil.which("mineru") or "mineru"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        raw_dir = _prepare_raw_output_dir(output_path, self.name)
-        cmd = [
-            mineru_bin,
-            "--path",
-            str(source_path),
-            "--output",
-            str(raw_dir),
-            "--backend",
-            "pipeline",
-            "--method",
-            "txt",
-            "--formula",
-            "true",
-            "--table",
-            "true",
-        ]
-        proc = _run_parser_command(
-            cmd,
-            parser_name=self.name,
+        return convert_with_mineru(
+            source_path=source_path,
+            output_path=output_path,
+            source_type=source_type,
+            sha256=sha256,
             timeout_seconds=MINERU_TIMEOUT_SECONDS,
         )
-        if proc.returncode != 0:
-            log_event(
-                "parser.failed",
-                "error",
-                parser=self.name,
-                source_path=str(source_path),
-                output_path=str(output_path),
-                raw_dir=str(raw_dir),
-                returncode=proc.returncode,
-                stderr_tail=proc.stderr[-1000:],
-            )
-            raise RuntimeError(f"mineru failed for {source_path}: {proc.stderr[-1000:]}")
-        raw = _single_markdown_output(raw_dir, self.name, source_path)
-        _wrap_parser_output(raw, source_path, output_path, source_type, self.name, sha256)
-        return ParserResult(self.name, output_path, proc.stdout, proc.stderr)
