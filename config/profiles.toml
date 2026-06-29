@@ -2,7 +2,7 @@
 name = "quant-books"
 source_paths = ["/home/saulius/atlas/notes/quant/books"]
 file_types = ["pdf"]
-parser_mode = "marker"
+parser_mode = "glm-ocr"
 target_dataset = "quant-books"
 source_type = "book"
 enabled = true
@@ -18,7 +18,7 @@ suffixes = []
 name = "quant-papers"
 source_paths = ["/home/saulius/atlas/notes/quant/papers"]
 file_types = ["pdf", "md"]
-parser_mode = "marker"
+parser_mode = "glm-ocr"
 target_dataset = "quant-papers"
 source_type = "paper"
 enabled = true

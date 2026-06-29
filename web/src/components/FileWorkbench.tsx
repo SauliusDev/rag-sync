@@ -16,6 +16,8 @@ import {
 import { loadJson, saveJson } from '../storage';
 import { FileFilters, type FileFilterState } from './FileFilters';
 import { ImportBatchDialog } from './ImportBatchDialog';
+import { DataTableShell } from './ui/DataTableShell';
+import { ToolbarGroup } from './ui/ToolbarGroup';
 
 function fileName(path: string) {
   return path.split('/').pop() || path;
@@ -23,6 +25,26 @@ function fileName(path: string) {
 
 function formatState(state: string) {
   return state.replace(/_/g, ' ');
+}
+
+type FileStage = {
+  label: string;
+  detail: string;
+  progress: number | null;
+  tone: string;
+};
+
+export function toneForFileState(state: string) {
+  if (['failed', 'missing', 'changed'].includes(state)) {
+    return state;
+  }
+  if (['parsed', 'uploaded', 'converted', 'completed'].includes(state)) {
+    return 'completed';
+  }
+  if (state === 'canceled') {
+    return 'canceled';
+  }
+  return 'queued';
 }
 
 export function buildConversionStage(file: SourceFile) {
@@ -38,7 +60,7 @@ export function buildConversionStage(file: SourceFile) {
     return {
       label: 'Marker running',
       detail: 'Converting',
-      progress: Math.max(8, Math.round((file.job.progress || 0.35) * 100)),
+      progress: Number.isFinite(file.job.progress) ? Math.round(file.job.progress * 100) : null,
       tone: 'running',
     };
   }
@@ -49,7 +71,7 @@ export function buildConversionStage(file: SourceFile) {
     label: formatState(file.state),
     detail: file.extension,
     progress: 0,
-    tone: 'queued',
+    tone: toneForFileState(file.state),
   };
 }
 
@@ -68,7 +90,7 @@ export function buildRagflowStage(file: SourceFile) {
     return {
       label: hasUpload ? 'Parsing' : 'Uploading',
       detail: hasUpload ? 'RAGFlow ingest' : 'Sending markdown',
-      progress: hasUpload ? 82 : 65,
+      progress: Number.isFinite(file.job.progress) ? Math.round(file.job.progress * 100) : null,
       tone: 'running',
     };
   }
@@ -76,9 +98,14 @@ export function buildRagflowStage(file: SourceFile) {
     return { label: 'Queued', detail: 'Waiting for RAGFlow', progress: 0, tone: 'queued' };
   }
   if (file.ragflow?.upload_status === 'uploaded') {
-    return { label: 'Uploaded', detail: 'Ready to parse', progress: 68, tone: 'running' };
+    return { label: 'Uploaded', detail: 'Ready to parse', progress: 0, tone: 'queued' };
   }
-  return { label: 'Not uploaded', detail: 'No RAGFlow document', progress: 0, tone: 'queued' };
+  return {
+    label: 'Not uploaded',
+    detail: 'No RAGFlow document',
+    progress: 0,
+    tone: toneForFileState(file.state),
+  };
 }
 
 function summarizeCounts(values: string[]) {
@@ -138,6 +165,56 @@ export function isNearListEnd(metrics: {
   return metrics.scrollTop + metrics.clientHeight >= metrics.scrollHeight - SCROLL_LOAD_THRESHOLD;
 }
 
+export function resolveInspectorFile(
+  selected: SourceFile | null,
+  selectedFiles: SourceFile[],
+): SourceFile | null {
+  if (selectedFiles.length === 1) {
+    return selectedFiles[0];
+  }
+  return selected;
+}
+
+export function resolveReloadSelection(
+  nextFiles: SourceFile[],
+  current: SourceFile | null,
+): SourceFile | null {
+  if (!current) {
+    return null;
+  }
+  return nextFiles.find((file) => file.id === current.id) ?? null;
+}
+
+export function shouldShowSelectionBar(selectedCount: number) {
+  return selectedCount > 1;
+}
+
+export function buildLibraryStatus({
+  loading,
+  working,
+  bulkQueueAction,
+  filteredCount,
+}: {
+  loading: boolean;
+  working: boolean;
+  bulkQueueAction: 'sync_file' | 'sync_filtered' | '';
+  filteredCount: number;
+}) {
+  if (working) {
+    return 'Scanning configured profiles';
+  }
+  if (bulkQueueAction === 'sync_filtered') {
+    return 'Queueing filtered files';
+  }
+  if (bulkQueueAction === 'sync_file') {
+    return 'Queueing selected files';
+  }
+  if (loading) {
+    return 'Refreshing file library';
+  }
+  return `${filteredCount} files match current filters`;
+}
+
 export function FileWorkbench({
   profiles,
   profilesError,
@@ -154,6 +231,8 @@ export function FileWorkbench({
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [fileAction, setFileAction] = useState<'convert' | 'upload' | 'parse' | ''>('');
+  const [selectedQueueAction, setSelectedQueueAction] = useState<'sync_file' | 'restart_ragflow' | ''>('');
+  const [bulkQueueAction, setBulkQueueAction] = useState<'sync_file' | 'sync_filtered' | ''>('');
   const [importBatchOpen, setImportBatchOpen] = useState(initialImportBatchOpen);
   const [error, setError] = useState('');
 
@@ -165,12 +244,7 @@ export function FileWorkbench({
       setSelectedIds((current) =>
         current.filter((sourceFileId) => nextFiles.some((file) => file.id === sourceFileId)),
       );
-      setSelected((current) => {
-        const rememberedId = loadJson<number | null>('rag-sync.selected-file-id', null);
-        const selectedId = current?.id ?? rememberedId;
-        if (selectedId == null) return nextFiles[0] ?? null;
-        return nextFiles.find((file) => file.id === selectedId) ?? nextFiles[0] ?? null;
-      });
+      setSelected((current) => resolveReloadSelection(nextFiles, current));
       setError('');
     } catch (cause) {
       setFiles([]);
@@ -275,6 +349,12 @@ export function FileWorkbench({
     () => (bulkSelectionActive ? buildSelectionSummary(selectedFiles) : null),
     [bulkSelectionActive, selectedFiles],
   );
+  const inspectorFile = useMemo(
+    () => resolveInspectorFile(selected, selectedFiles),
+    [selected, selectedFiles],
+  );
+  const selectedConversionStage = inspectorFile ? buildConversionStage(inspectorFile) : null;
+  const selectedRagflowStage = inspectorFile ? buildRagflowStage(inspectorFile) : null;
 
   useEffect(() => {
     setVisibleCount(INITIAL_VISIBLE_ROWS);
@@ -296,7 +376,6 @@ export function FileWorkbench({
 
   function selectFile(file: SourceFile) {
     setSelected(file);
-    saveJson('rag-sync.selected-file-id', file.id);
   }
 
   function toggleFileSelection(sourceFileId: number, checked: boolean) {
@@ -339,17 +418,17 @@ export function FileWorkbench({
   }
 
   async function runFileAction(action: 'convert' | 'upload' | 'parse') {
-    if (!selected) return;
+    if (!inspectorFile) return;
     setFileAction(action);
     setError('');
     try {
       if (action === 'convert') {
-        const profile = profiles.find((candidate) => candidate.name === selected.profile_name);
-        await convertFile(selected.id, profile?.parser_mode);
+        const profile = profiles.find((candidate) => candidate.name === inspectorFile.profile_name);
+        await convertFile(inspectorFile.id, profile?.parser_mode);
       } else if (action === 'upload') {
-        await uploadFile(selected.id);
+        await uploadFile(inspectorFile.id);
       } else {
-        await parseFile(selected.id);
+        await parseFile(inspectorFile.id);
       }
       await reload();
     } catch (cause) {
@@ -360,21 +439,25 @@ export function FileWorkbench({
   }
 
   async function enqueueSelected(kind: 'sync_file' | 'restart_ragflow') {
-    if (!selected) return;
+    if (!inspectorFile) return;
+    setSelectedQueueAction(kind);
     setError('');
     try {
       await enqueueJob({
         kind,
-        source_file_id: selected.id,
-        profile_name: selected.profile_name,
+        source_file_id: inspectorFile.id,
+        profile_name: inspectorFile.profile_name,
       });
       await reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : `Failed to enqueue ${kind}`);
+    } finally {
+      setSelectedQueueAction('');
     }
   }
 
   async function enqueueBulk(kind: 'sync_file' | 'sync_filtered') {
+    setBulkQueueAction(kind);
     setError('');
     try {
       if (kind === 'sync_file') {
@@ -386,6 +469,8 @@ export function FileWorkbench({
       await reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : `Failed to enqueue ${kind}`);
+    } finally {
+      setBulkQueueAction('');
     }
   }
 
@@ -394,104 +479,249 @@ export function FileWorkbench({
     setImportBatchOpen(false);
   }
 
+  const currentVisibleCount = Math.min(filtered.length, visibleCount);
+  const visibleSummary =
+    filtered.length === 0
+      ? 'No matching files'
+      : `Showing ${currentVisibleCount} of ${filtered.length} files`;
+  const libraryStatus = buildLibraryStatus({
+    loading,
+    working,
+    bulkQueueAction,
+    filteredCount: filtered.length,
+  });
+  const selectedFileActivity =
+    fileAction === 'convert'
+      ? 'Running conversion'
+      : fileAction === 'upload'
+        ? 'Uploading markdown to RAGFlow'
+        : fileAction === 'parse'
+          ? 'Starting RAGFlow parse'
+          : selectedQueueAction === 'sync_file'
+            ? 'Queueing sync job'
+            : selectedQueueAction === 'restart_ragflow'
+              ? 'Queueing RAGFlow restart'
+              : '';
+  const singleFileActionsDisabled =
+    !inspectorFile || bulkSelectionActive || Boolean(fileAction) || Boolean(selectedQueueAction) || Boolean(bulkQueueAction);
+  const selectionActionsDisabled =
+    selectedCount === 0 || Boolean(fileAction) || Boolean(selectedQueueAction) || Boolean(bulkQueueAction);
+  const focusTitle = bulkSelectionActive
+    ? `${selectedCount} files selected`
+    : inspectorFile
+      ? fileName(inspectorFile.source_path)
+      : 'No file selected';
+  const focusCountLabel =
+    selectedCount > 0 ? `${selectedCount} selected` : inspectorFile ? 'Focused' : '0 selected';
+  const focusPath = bulkSelectionActive
+    ? selectionSummary?.profileSummary ?? 'Selection spans multiple files.'
+    : inspectorFile?.source_path ?? 'Select a file to inspect its sync state and launch file-specific actions.';
+
   return (
-    <div className="workbench">
-      <div className="workbench-toolbar">
-        <FileFilters filters={filters} profiles={profiles} onChange={updateFilters} />
-        <button className="action-button" type="button" onClick={reload} disabled={loading}>
-          <RefreshCcw size={16} aria-hidden="true" />
-          Refresh
-        </button>
-        <button
-          className="action-button primary"
-          type="button"
-          onClick={scanDefaultProfiles}
-          disabled={working || profilesLoading || profiles.length === 0 || Boolean(profilesError)}
-        >
-          <RefreshCcw size={16} aria-hidden="true" />
-          {working ? 'Scanning' : 'Scan profiles'}
-        </button>
+    <div className="workbench file-workbench">
+      <div className="file-control-band">
+        <div className="file-control-row">
+          <FileFilters filters={filters} profiles={profiles} onChange={updateFilters} />
+          <ToolbarGroup label="Library actions">
+            <button className="action-button" type="button" onClick={reload} disabled={loading}>
+              <RefreshCcw size={16} aria-hidden="true" />
+              {loading ? 'Refreshing' : 'Refresh'}
+            </button>
+            <button
+              className="action-button primary"
+              type="button"
+              onClick={scanDefaultProfiles}
+              disabled={working || profilesLoading || profiles.length === 0 || Boolean(profilesError)}
+            >
+              <RefreshCcw size={16} aria-hidden="true" />
+              {working ? 'Scanning profiles' : 'Scan profiles'}
+            </button>
+            <button className="action-button" type="button" onClick={() => setImportBatchOpen(true)}>
+              <FileUp size={16} aria-hidden="true" />
+              {importBatchOpen ? 'Import dialog open' : 'Import batch'}
+            </button>
+          </ToolbarGroup>
+        </div>
+        <div className="file-control-meta">
+          <p className="file-activity-label" aria-live="polite">
+            {libraryStatus}
+          </p>
+          <p className="file-activity-label">{visibleSummary}</p>
+        </div>
+        {error ? (
+          <p className="inline-error" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
 
-      {error ? <p className="inline-error">{error}</p> : null}
-
-      <div className="workbench-split">
-        <div className="table-pane">
-          <div className="table-toolbar">
-            <div className="table-summary" aria-live="polite">
-              {selectedCount} selected · Showing {Math.min(filtered.length, visibleCount)} of {filtered.length} files
-            </div>
-            <div className="bulk-actions" aria-label="Bulk file actions">
-              <button
-                className="action-button"
-                type="button"
-                onClick={() => toggleVisibleSelection(true)}
-                disabled={visibleFiles.length === 0}
-              >
-                Select visible
-              </button>
-              <button
-                className="action-button"
-                type="button"
-                onClick={selectFilteredFiles}
-                disabled={filtered.length === 0}
-              >
-                Select filtered
-              </button>
-              <button
-                className="action-button"
-                type="button"
-                onClick={clearSelection}
-                disabled={selectedCount === 0}
-              >
-                Clear selection
-              </button>
-              <button
-                className="action-button"
-                type="button"
-                onClick={() => setImportBatchOpen(true)}
-              >
-                Import batch
-              </button>
-              <button
-                className="action-button primary"
-                type="button"
-                onClick={() => enqueueBulk('sync_file')}
-                disabled={selectedCount === 0}
-              >
-                Sync selected
-              </button>
-              <button
-                className="action-button primary"
-                type="button"
-                onClick={() => enqueueBulk('sync_filtered')}
-                disabled={filtered.length === 0}
-              >
-                Sync filtered
-              </button>
-            </div>
+      <div className={inspectorFile && !bulkSelectionActive ? 'file-focus-bar is-compact' : 'file-focus-bar'}>
+        <div className="file-focus-copy">
+          <div className="file-focus-topline">
+            <strong>{focusTitle}</strong>
+            <span className="file-focus-count">{focusCountLabel}</span>
           </div>
+          <p className="file-focus-path">{focusPath}</p>
+          <div className="file-focus-meta">
+            {bulkSelectionActive && selectionSummary ? (
+              <>
+                <span>{selectionSummary.typeSummary}</span>
+                <span>{selectionSummary.stateSummary}</span>
+                <span>{selectionSummary.ragflowSummary}</span>
+              </>
+            ) : inspectorFile && selectedConversionStage && selectedRagflowStage ? (
+              <>
+                <span>{inspectorFile.profile_name}</span>
+                <span>
+                  {selectedConversionStage.label} · {selectedConversionStage.detail}
+                </span>
+                <span>
+                  {selectedRagflowStage.label} · {selectedRagflowStage.detail}
+                </span>
+                {selectedFileActivity ? <span>{selectedFileActivity}</span> : null}
+              </>
+            ) : (
+              <span>Choose a row to inspect, or use the checkboxes to queue work in bulk.</span>
+            )}
+          </div>
+        </div>
+        <div className="file-focus-actions" aria-label="File sync actions">
+          <button
+            className="action-button primary"
+            type="button"
+            onClick={() => runFileAction('convert')}
+            disabled={singleFileActionsDisabled}
+          >
+            <WandSparkles size={16} aria-hidden="true" />
+            {fileAction === 'convert' ? 'Converting' : 'Convert'}
+          </button>
+          <button
+            className="action-button"
+            type="button"
+            onClick={() => runFileAction('upload')}
+            disabled={singleFileActionsDisabled}
+          >
+            <FileUp size={16} aria-hidden="true" />
+            {fileAction === 'upload' ? 'Uploading' : 'Upload'}
+          </button>
+          <button
+            className="action-button"
+            type="button"
+            onClick={() => runFileAction('parse')}
+            disabled={singleFileActionsDisabled}
+          >
+            <Play size={16} aria-hidden="true" />
+            {fileAction === 'parse' ? 'Parsing' : 'Parse'}
+          </button>
+          <button
+            className="action-button primary"
+            type="button"
+            onClick={() => enqueueSelected('sync_file')}
+            disabled={singleFileActionsDisabled}
+          >
+            <Play size={16} aria-hidden="true" />
+            {selectedQueueAction === 'sync_file' ? 'Queueing sync' : 'Sync'}
+          </button>
+          <button
+            className="action-button"
+            type="button"
+            onClick={() => enqueueSelected('restart_ragflow')}
+            disabled={singleFileActionsDisabled}
+          >
+            <RefreshCcw size={16} aria-hidden="true" />
+            {selectedQueueAction === 'restart_ragflow' ? 'Queueing restart' : 'Restart RAGFlow'}
+          </button>
+          <button
+            className="action-button"
+            type="button"
+            onClick={clearSelection}
+            disabled={selectedCount === 0}
+          >
+            Clear
+          </button>
+          <button
+            className="action-button"
+            type="button"
+            onClick={() => enqueueBulk('sync_file')}
+            disabled={selectionActionsDisabled}
+          >
+            <Play size={16} aria-hidden="true" />
+            {bulkQueueAction === 'sync_file' ? 'Queueing selected' : 'Sync selected'}
+          </button>
+        </div>
+      </div>
+
+      <div className="workbench-split file-workbench-split">
+        <DataTableShell
+          label="Source file library"
+          toolbar={
+            <div className="file-table-toolbar">
+              <div className="table-summary" aria-live="polite">
+                {selectedCount} selected · {visibleSummary}
+              </div>
+              <ToolbarGroup label="Selection tools">
+                <button
+                  className="action-button"
+                  type="button"
+                  onClick={() => toggleVisibleSelection(true)}
+                  disabled={visibleFiles.length === 0}
+                >
+                  Select visible
+                </button>
+                <button
+                  className="action-button"
+                  type="button"
+                  onClick={selectFilteredFiles}
+                  disabled={filtered.length === 0}
+                >
+                  Select filtered
+                </button>
+                <button
+                  className="action-button"
+                  type="button"
+                  onClick={() => enqueueBulk('sync_filtered')}
+                  disabled={filtered.length === 0 || bulkQueueAction === 'sync_filtered'}
+                >
+                  <Play size={16} aria-hidden="true" />
+                  {bulkQueueAction === 'sync_filtered' ? 'Queueing filtered' : 'Sync filtered'}
+                </button>
+              </ToolbarGroup>
+            </div>
+          }
+          footer={
+            filtered.length > currentVisibleCount ? (
+              <div className="file-table-footer">
+                <span className="table-summary">Scroll to load more rows</span>
+                <span className="table-summary">
+                  {currentVisibleCount} rendered · {filtered.length - currentVisibleCount} remaining
+                </span>
+              </div>
+            ) : undefined
+          }
+        >
           <div className="table-wrap" onScroll={handleListScroll}>
-            <table className="file-table">
+            <table className="file-table file-table-dense">
               <thead>
                 <tr>
-                  <th>
-                    <input
-                      type="checkbox"
-                      aria-label="Select visible files"
-                      checked={allVisibleSelected}
-                      onChange={(event) => toggleVisibleSelection(event.target.checked)}
-                    />
+                  <th scope="col">
+                    <label className="table-checkbox-target">
+                      <input
+                        type="checkbox"
+                        aria-label="Select visible files"
+                        checked={allVisibleSelected}
+                        onChange={(event) => toggleVisibleSelection(event.target.checked)}
+                      />
+                    </label>
                   </th>
-                  <th>File</th>
-                  <th>Type</th>
-                  <th>Profile</th>
-                  <th>Conversion</th>
-                  <th>RAGFlow</th>
+                  <th scope="col">File</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Profile</th>
+                  <th scope="col">Conversion</th>
+                  <th scope="col">RAGFlow</th>
                 </tr>
               </thead>
               <tbody>
-                {loading ? (
+                {loading && files.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="empty-cell">
                       Loading files
@@ -511,13 +741,15 @@ export function FileWorkbench({
                       aria-selected={selected?.id === file.id}
                     >
                       <td>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${fileName(file.source_path)}`}
-                          checked={selectedIdSet.has(file.id)}
-                          onChange={(event) => toggleFileSelection(file.id, event.target.checked)}
-                          onClick={(event) => event.stopPropagation()}
-                        />
+                        <label className="table-checkbox-target">
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${fileName(file.source_path)}`}
+                            checked={selectedIdSet.has(file.id)}
+                            onChange={(event) => toggleFileSelection(file.id, event.target.checked)}
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        </label>
                       </td>
                       <td>
                         <button
@@ -543,183 +775,7 @@ export function FileWorkbench({
               </tbody>
             </table>
           </div>
-        </div>
-
-        <aside className="file-details" aria-label="File details">
-          {bulkSelectionActive && selectionSummary ? (
-            <>
-              <div>
-                <h2>{selectionSummary.title}</h2>
-                <p>{selectionSummary.selectionLabel}</p>
-              </div>
-              <div className="file-actions" aria-label="Bulk sync actions">
-                <button
-                  className="action-button primary"
-                  type="button"
-                  onClick={() => enqueueBulk('sync_file')}
-                  disabled={selectedCount === 0}
-                >
-                  <Play size={16} aria-hidden="true" />
-                  Sync selected
-                </button>
-                <button
-                  className="action-button"
-                  type="button"
-                  onClick={clearSelection}
-                  disabled={selectedCount === 0}
-                >
-                  <RefreshCcw size={16} aria-hidden="true" />
-                  Clear selection
-                </button>
-              </div>
-              <dl>
-                <div>
-                  <dt>Profiles</dt>
-                  <dd>{selectionSummary.profileSummary}</dd>
-                </div>
-                <div>
-                  <dt>Types</dt>
-                  <dd>{selectionSummary.typeSummary}</dd>
-                </div>
-                <div>
-                  <dt>States</dt>
-                  <dd>{selectionSummary.stateSummary}</dd>
-                </div>
-                <div>
-                  <dt>Parsers</dt>
-                  <dd>{selectionSummary.parserSummary}</dd>
-                </div>
-                <div>
-                  <dt>RAGFlow</dt>
-                  <dd>{selectionSummary.ragflowSummary}</dd>
-                </div>
-              </dl>
-            </>
-          ) : selected ? (
-            <>
-              <div>
-                <h2>{fileName(selected.source_path)}</h2>
-                <p>{selected.source_path}</p>
-                <p className="details-meta">
-                  {selectedIdSet.has(selected.id)
-                    ? `Selected for bulk actions · ${selectedCount} total selected`
-                    : `${selectedCount} selected`}
-                </p>
-              </div>
-              <div className="file-actions" aria-label="File sync actions">
-                <button
-                  className="action-button primary"
-                  type="button"
-                  onClick={() => runFileAction('convert')}
-                  disabled={Boolean(fileAction)}
-                >
-                  <WandSparkles size={16} aria-hidden="true" />
-                  {fileAction === 'convert' ? 'Converting' : 'Convert'}
-                </button>
-                <button
-                  className="action-button"
-                  type="button"
-                  onClick={() => runFileAction('upload')}
-                  disabled={Boolean(fileAction)}
-                >
-                  <FileUp size={16} aria-hidden="true" />
-                  {fileAction === 'upload' ? 'Uploading' : 'Upload'}
-                </button>
-                <button
-                  className="action-button"
-                  type="button"
-                  onClick={() => runFileAction('parse')}
-                  disabled={Boolean(fileAction)}
-                >
-                  <Play size={16} aria-hidden="true" />
-                  {fileAction === 'parse' ? 'Parsing' : 'Parse'}
-                </button>
-                <button
-                  className="action-button primary"
-                  type="button"
-                  onClick={() => enqueueSelected('sync_file')}
-                >
-                  <Play size={16} aria-hidden="true" />
-                  Sync
-                </button>
-                <button
-                  className="action-button"
-                  type="button"
-                  onClick={() => enqueueSelected('restart_ragflow')}
-                >
-                  <RefreshCcw size={16} aria-hidden="true" />
-                  Restart RAGFlow
-                </button>
-              </div>
-              <dl>
-                <div>
-                  <dt>Profile</dt>
-                  <dd>{selected.profile_name}</dd>
-                </div>
-                <div>
-                  <dt>Type</dt>
-                  <dd>{selected.source_type}</dd>
-                </div>
-                <div>
-                  <dt>Extension</dt>
-                  <dd>{selected.extension}</dd>
-                </div>
-                <div>
-                  <dt>Status</dt>
-                  <dd>{formatState(selected.state)}</dd>
-                </div>
-                <div>
-                  <dt>Conversion stage</dt>
-                  <dd>
-                    {buildConversionStage(selected).label} · {buildConversionStage(selected).detail}
-                  </dd>
-                </div>
-                <div>
-                  <dt>RAGFlow stage</dt>
-                  <dd>{buildRagflowStage(selected).label} · {buildRagflowStage(selected).detail}</dd>
-                </div>
-                <div>
-                  <dt>Included</dt>
-                  <dd>{selected.included ? 'yes' : 'no'}</dd>
-                </div>
-                <div>
-                  <dt>Tags</dt>
-                  <dd>{selected.tags || 'none'}</dd>
-                </div>
-                <div>
-                  <dt>Note</dt>
-                  <dd>{selected.note || 'none'}</dd>
-                </div>
-                <div>
-                  <dt>Updated</dt>
-                  <dd>{selected.updated_at}</dd>
-                </div>
-                <div>
-                  <dt>Artifact</dt>
-                  <dd>{selected.artifact?.output_path ?? 'none'}</dd>
-                </div>
-                <div>
-                  <dt>Artifact quality</dt>
-                  <dd>{selected.artifact?.quality_status ?? 'none'}</dd>
-                </div>
-                <div>
-                  <dt>RAGFlow document</dt>
-                  <dd>{selected.ragflow?.document_name ?? 'none'}</dd>
-                </div>
-                <div>
-                  <dt>RAGFlow status</dt>
-                  <dd>{selected.ragflow?.parse_status ?? 'not uploaded'}</dd>
-                </div>
-                <div>
-                  <dt>Chunks</dt>
-                  <dd>{selected.ragflow?.chunk_count ?? '-'}</dd>
-                </div>
-              </dl>
-            </>
-          ) : (
-            <p className="details-empty">Select a file to inspect sync state.</p>
-          )}
-        </aside>
+        </DataTableShell>
       </div>
       {importBatchOpen ? (
         <ImportBatchDialog
@@ -731,19 +787,26 @@ export function FileWorkbench({
   );
 }
 
-function StageCell({
-  stage,
-}: {
-  stage: { label: string; detail: string; progress: number; tone: string };
-}) {
+export function StageCell({ stage }: { stage: FileStage }) {
+  const showMeasuredProgress = typeof stage.progress === 'number';
+  const progressValue = showMeasuredProgress ? stage.progress ?? undefined : undefined;
+
   return (
     <div className="stage-cell">
       <div className="stage-cell-top">
         <span className={`state-badge state-${stage.tone}`}>{stage.label}</span>
-        <span className="stage-percent">{stage.progress}%</span>
+        {showMeasuredProgress ? <span className="stage-percent">{stage.progress}%</span> : null}
       </div>
-      <div className="mini-progress">
-        <span style={{ width: `${stage.progress}%` }} />
+      <div
+        className={showMeasuredProgress ? 'mini-progress' : 'mini-progress is-indeterminate'}
+        role="progressbar"
+        aria-label={`${stage.label} progress`}
+        aria-valuemin={showMeasuredProgress ? 0 : undefined}
+        aria-valuemax={showMeasuredProgress ? 100 : undefined}
+        aria-valuenow={progressValue}
+        aria-valuetext={showMeasuredProgress ? undefined : stage.detail}
+      >
+        {showMeasuredProgress ? <span style={{ width: `${stage.progress}%` }} /> : null}
       </div>
       <div className="stage-detail">{stage.detail}</div>
     </div>

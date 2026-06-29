@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import json
 import inspect
+import json
 import re
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from rag_sync.config import DEFAULT_DATA_DIR, DEFAULT_PROFILE_PATH, load_profiles
 from rag_sync.db import RagSyncDb
+from rag_sync.glm_ocr import GLM_OCR_MODEL, glm_ocr_raw_dir
 from rag_sync.ldd import log_event
 from rag_sync.models import ParserMode, Profile, SourceState
-from rag_sync.parsers import MarkerParser, MinerUParser, PassthroughParser
+from rag_sync.parsers import GlmOcrParser, MarkerParser, MinerUParser, PassthroughParser
 from rag_sync.quality import check_markdown_quality
 from rag_sync.ragflow_client import RagFlowClient
 from rag_sync.scanner import scan_profile, sha256_file
@@ -44,8 +45,12 @@ def output_path_for(profile: Profile, source_path: Path, parser_name: str) -> Pa
     return output_root / profile.name / parser_name / f"{_safe_stem(source_path)}-{path_hash}.md"
 
 
-def _parser_for_name(parser_name: str) -> MarkerParser | MinerUParser | PassthroughParser:
+def _parser_for_name(
+    parser_name: str,
+) -> GlmOcrParser | MarkerParser | MinerUParser | PassthroughParser:
     parser_mode = ParserMode(parser_name)
+    if parser_mode is ParserMode.GLM_OCR:
+        return GlmOcrParser()
     if parser_mode is ParserMode.MARKER:
         return MarkerParser()
     if parser_mode is ParserMode.MINERU:
@@ -148,6 +153,7 @@ def _convert_with_parser(
         quality_status=quality.status,
         warnings_json=json.dumps(quality.warnings),
     )
+    _record_conversion_usage(db, row, result.parser, result.output_path)
     if quality.status == "blocked":
         db.update_source_state(int(row["id"]), SourceState.FAILED)
         error = (
@@ -184,6 +190,61 @@ def _convert_with_parser(
         warnings=quality.warnings,
     )
     return result.output_path
+
+
+def _record_conversion_usage(
+    db: RagSyncDb,
+    row: dict[str, Any],
+    parser_name: str,
+    output_path: Path,
+) -> None:
+    if parser_name != ParserMode.GLM_OCR.value:
+        return
+    manifest_path = glm_ocr_raw_dir(output_path) / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        tokens = int(manifest.get("total_tokens") or 0)
+        cost_usd = float(manifest.get("estimated_cost_usd") or 0)
+    except Exception as exc:
+        log_event(
+            "usage.record.failed",
+            "error",
+            source_file_id=int(row["id"]),
+            provider="z-ai",
+            service="glm-ocr",
+            model=GLM_OCR_MODEL,
+            output_path=str(output_path),
+            manifest_path=str(manifest_path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return
+    db.record_usage_event(
+        provider="z-ai",
+        service="glm-ocr",
+        model=GLM_OCR_MODEL,
+        source_file_id=int(row["id"]),
+        tokens=tokens,
+        cost_usd=cost_usd,
+        metadata={
+            "profile_name": str(row["profile_name"]),
+            "source_type": str(row["source_type"]),
+            "source_path": str(row["source_path"]),
+            "output_path": str(output_path),
+            "page_count": manifest.get("page_count"),
+        },
+    )
+    log_event(
+        "usage.recorded",
+        "ok",
+        source_file_id=int(row["id"]),
+        provider="z-ai",
+        service="glm-ocr",
+        model=GLM_OCR_MODEL,
+        tokens=tokens,
+        cost_usd=cost_usd,
+        output_path=str(output_path),
+    )
 
 
 def persist_scan(db: RagSyncDb, profile: Profile) -> list[int]:
@@ -271,6 +332,108 @@ def _required_id(payload: dict[str, Any], primary: str, fallback: str, kind: str
     if value is None or not str(value).strip():
         raise RuntimeError(f"RAGFlow response missing {kind} id")
     return str(value)
+
+
+def _ragflow_parse_status(document: Mapping[str, Any]) -> str:
+    run = str(document.get("run") or "").strip().upper()
+    status = str(document.get("status") or "").strip().upper()
+    progress = document.get("progress")
+    try:
+        progress_value = float(progress) if progress is not None else None
+    except (TypeError, ValueError):
+        progress_value = None
+
+    if run == "DONE" or status == "1" or progress_value == 1.0:
+        return "parsed"
+    if run in {"CANCEL", "CANCELED", "CANCELLED", "STOP", "STOPPED"}:
+        return "stopped"
+    if run in {"FAIL", "FAILED", "ERROR"} or status in {"-1", "ERROR"}:
+        return "failed"
+    if run:
+        return "parsing"
+    return "not_started"
+
+
+async def refresh_ragflow_documents(
+    db: RagSyncDb,
+    client: RagFlowClient | None = None,
+) -> int:
+    with db.session() as conn:
+        rows = conn.execute(
+            """
+            SELECT source_file_id, dataset_id, dataset_name, document_id, parse_status
+            FROM ragflow_documents
+            WHERE upload_status = 'uploaded'
+            """
+        ).fetchall()
+
+    if not rows:
+        return 0
+
+    client = client or RagFlowClient()
+    by_dataset: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_dataset.setdefault(str(row["dataset_id"]), []).append(dict(row))
+
+    refreshed = 0
+    for dataset_id, dataset_rows in by_dataset.items():
+        log_event(
+            "ragflow.refresh.started",
+            "ok",
+            dataset_id=dataset_id,
+            document_count=len(dataset_rows),
+        )
+        try:
+            remote_documents = await client.list_documents(dataset_id)
+        except Exception as exc:
+            log_event(
+                "ragflow.refresh.failed",
+                "error",
+                dataset_id=dataset_id,
+                document_count=len(dataset_rows),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            continue
+        remote_by_id = {str(document.get("id")): document for document in remote_documents}
+        dataset_refreshed = 0
+        for row in dataset_rows:
+            source_file_id = int(row["source_file_id"])
+            document_id = str(row["document_id"])
+            remote = remote_by_id.get(document_id)
+            if remote is None:
+                continue
+            parse_status = _ragflow_parse_status(remote)
+            chunk_count = remote.get("chunk_count")
+            token_count = remote.get("token_count")
+            document_name = str(
+                remote.get("name") or remote.get("location") or document_id
+            )
+            db.upsert_ragflow_document(
+                source_file_id=source_file_id,
+                dataset_id=dataset_id,
+                dataset_name=str(remote.get("dataset_name") or row["dataset_name"] or ""),
+                document_id=document_id,
+                document_name=document_name,
+                upload_status="uploaded",
+                parse_status=parse_status,
+                chunk_count=int(chunk_count) if chunk_count is not None else None,
+                token_count=int(token_count) if token_count is not None else None,
+            )
+            if parse_status == "parsed":
+                db.update_source_state(source_file_id, SourceState.PARSED)
+            elif parse_status in {"parsing", "not_started"}:
+                db.update_source_state(source_file_id, SourceState.UPLOADED)
+            dataset_refreshed += 1
+        refreshed += dataset_refreshed
+        log_event(
+            "ragflow.refresh.completed",
+            "ok",
+            dataset_id=dataset_id,
+            document_count=len(dataset_rows),
+            refreshed_count=dataset_refreshed,
+        )
+    return refreshed
 
 
 async def upload_latest_artifact(

@@ -4,10 +4,10 @@ import {
   bulkEnqueueJobs,
   convertFile,
   enqueueJob,
+  fetchDatasets,
   fetchFiles,
   fetchJobs,
   fetchProfiles,
-  fetchQuerySet,
   fetchSettings,
   fetchStatus,
   killQueue,
@@ -381,21 +381,71 @@ describe('local storage helpers', () => {
   });
 });
 
-describe('retrieval API', () => {
-  it('returns retrieval query sets from the API response', async () => {
+describe('datasets API', () => {
+  it('returns dataset overview from the API response', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({
-          queries: [{ id: 'Q1', question: 'What is d1?' }],
+          datasets: [
+            {
+              name: 'quant-books',
+              exists: true,
+              protected: false,
+              coverage: {
+                file_count: 2,
+                indexed_documents: 2,
+                parsed_documents: 1,
+                stuck_documents: 0,
+                failed_documents: 1,
+                chunk_count: 11,
+              },
+              profiles: [
+                {
+                  name: 'books-marker',
+                  parser_mode: 'marker',
+                  source_type: 'book',
+                  source_paths: ['/atlas/books'],
+                  file_count: 2,
+                },
+              ],
+              drift: [],
+            },
+          ],
+          remote_error: null,
         }),
         { status: 200 },
       );
 
     try {
-      await expect(fetchQuerySet('formula-benchmark')).resolves.toEqual([
-        { id: 'Q1', question: 'What is d1?' },
-      ]);
+      await expect(fetchDatasets()).resolves.toEqual({
+        datasets: [
+          {
+            name: 'quant-books',
+            exists: true,
+            protected: false,
+            coverage: {
+              file_count: 2,
+              indexed_documents: 2,
+              parsed_documents: 1,
+              stuck_documents: 0,
+              failed_documents: 1,
+              chunk_count: 11,
+            },
+            profiles: [
+              {
+                name: 'books-marker',
+                parser_mode: 'marker',
+                source_type: 'book',
+                source_paths: ['/atlas/books'],
+                file_count: 2,
+              },
+            ],
+            drift: [],
+          },
+        ],
+        remote_error: null,
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

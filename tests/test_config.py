@@ -66,6 +66,10 @@ def test_load_profiles_reads_committed_config():
     profiles = load_profiles(DEFAULT_PROFILE_PATH)
 
     assert len(profiles) == 4
+    quant_books = next(profile for profile in profiles if profile.name == "quant-books")
+    assert quant_books.parser_mode == ParserMode.GLM_OCR
+    quant_papers = next(profile for profile in profiles if profile.name == "quant-papers")
+    assert quant_papers.parser_mode == ParserMode.GLM_OCR
     quant_videos = next(profile for profile in profiles if profile.name == "quant-videos")
     assert quant_videos.source_paths == (Path("/home/saulius/atlas/notes/quant/videos"),)
     assert quant_videos.file_types == ("md",)

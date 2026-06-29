@@ -1,0 +1,11 @@
+{
+  "name": "rag-sync",
+  "private": true,
+  "scripts": {
+    "dev": "bash scripts/dev.sh",
+    "dev:api": "uv run uvicorn rag_sync.api:app --host 0.0.0.0 --port 8091",
+    "dev:web": "npm --prefix web run dev -- --port 5174",
+    "build": "npm --prefix web run build",
+    "test": "uv run pytest && npm --prefix web test"
+  }
+}

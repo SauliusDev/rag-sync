@@ -3,6 +3,7 @@ from pathlib import Path
 
 from rag_sync.db import RagSyncDb
 from rag_sync.history import (
+    apply_live_glm_ocr_progress,
     estimate_from_history,
     estimate_from_live_progress,
     estimate_job_timing,
@@ -20,6 +21,57 @@ def test_estimate_from_live_progress_uses_elapsed_and_progress():
 def test_estimate_from_live_progress_rejects_zero_and_complete_progress():
     assert estimate_from_live_progress(elapsed_seconds=600, progress=0) is None
     assert estimate_from_live_progress(elapsed_seconds=600, progress=1) == 0
+
+
+def test_apply_live_glm_ocr_progress_uses_rendered_pages_for_running_sync_file(
+    tmp_path: Path,
+):
+    source = tmp_path / "Advanced Portfolio Management - Grinold & Kahn.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    output_root = tmp_path / "outputs"
+    raw_dir = (
+        output_root
+        / "quant-books"
+        / "glm-ocr"
+        / ".parser-raw"
+        / "glm-ocr"
+        / "Advanced_Portfolio_Management_-_Grinold_Kahn-8ce3123c9854"
+        / "rendered-pages"
+    )
+    raw_dir.mkdir(parents=True)
+    for page in range(1, 334):
+        (raw_dir / f"page_{page:04d}.png").write_bytes(b"png")
+
+    job = {
+        "kind": "sync_file",
+        "status": "running",
+        "profile_name": "quant-books",
+        "progress": 0.0,
+    }
+    source_row = {
+        "profile_name": "quant-books",
+        "source_path": str(source),
+        "extension": "pdf",
+        "page_count": 666,
+        "artifact": {
+            "parser": "marker",
+            "output_path": str(
+                output_root
+                / "quant-books"
+                / "marker"
+                / "Advanced_Portfolio_Management_-_Grinold_Kahn-8ce3123c9854.md"
+            ),
+        },
+    }
+
+    updated = apply_live_glm_ocr_progress(job, source_row, output_root=output_root)
+
+    assert updated["progress"] == 332 / 666
+    assert updated["live_stage"] == "convert"
+    assert updated["live_progress_percent"] == 50
+    assert updated["live_progress_pages_done"] == 332
+    assert updated["live_progress_page_count"] == 666
+    assert updated["live_progress_detail"] == "332/666 OCR pages"
 
 
 def test_estimate_from_history_uses_matching_group_average():
@@ -459,7 +511,7 @@ def test_estimate_job_timing_for_sync_file_uses_remaining_stage_path(tmp_path: P
 
     after_convert_estimate = estimate_job_timing(db, before_convert_job, after_convert_row)
 
-    assert after_convert_estimate["eta_seconds"] == 45
+    assert after_convert_estimate["eta_seconds"] == 165
 
     db.upsert_ragflow_document(
         source_id,
@@ -474,7 +526,7 @@ def test_estimate_job_timing_for_sync_file_uses_remaining_stage_path(tmp_path: P
 
     after_upload_estimate = estimate_job_timing(db, before_convert_job, after_upload_row)
 
-    assert after_upload_estimate["eta_seconds"] == 15
+    assert after_upload_estimate["eta_seconds"] == 165
 
 
 def test_estimate_job_timing_for_sync_file_requires_successful_upload_before_parse_only(
@@ -519,8 +571,10 @@ def test_estimate_job_timing_for_sync_file_requires_successful_upload_before_par
 
     estimate = estimate_job_timing(db, job, row)
 
-    assert estimate["eta_seconds"] == 45
-    assert estimate["timing_basis"].endswith("upload+book+pdf+1-10MB+marker -> parse+book+pdf+1-10MB+marker")
+    assert estimate["eta_seconds"] == 165
+    assert estimate["timing_basis"] == (
+        "convert+book+pdf+1-10MB -> upload+book+pdf+1-10MB -> parse+book+pdf+1-10MB"
+    )
 
 
 def test_estimate_job_timing_uses_artifact_parser_for_post_convert_eta(tmp_path: Path):
@@ -588,9 +642,9 @@ def test_estimate_job_timing_uses_artifact_parser_for_post_convert_eta(tmp_path:
 
     estimate = estimate_job_timing(db, job, row)
 
-    assert estimate["eta_seconds"] == 135
+    assert estimate["eta_seconds"] == 128
     assert estimate["timing_basis"] == (
-        "upload+book+pdf+1-10MB+mineru -> parse+book+pdf+1-10MB+mineru"
+        "recent_median -> upload+book+pdf+1-10MB -> parse+book+pdf+1-10MB"
     )
 
 
@@ -690,6 +744,48 @@ def test_estimate_queue_timing_sums_active_and_queued_jobs(tmp_path: Path):
     assert estimate["throughput_label"] == "recent median 1m/file"
 
 
+def test_quant_paper_pdf_eta_uses_glm_ocr_profile_default(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        "quant-papers",
+        "/tmp/paper.pdf",
+        "paper",
+        "pdf",
+        "abc",
+        1_000_000,
+        1.0,
+        SourceState.NEW,
+        page_count=10,
+    )
+    run_id = db.create_pipeline_run(
+        source_id,
+        "quant-papers",
+        "paper",
+        "glm-ocr",
+        "test",
+    )
+    db.record_stage_event(
+        run_id,
+        None,
+        source_id,
+        "convert",
+        "completed",
+        1,
+        "",
+        30,
+        "",
+    )
+    queued = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-papers")
+    files = {source_id: db.list_file_summaries(profile_names={"quant-papers"})[0]}
+    jobs = [job for job in db.list_jobs() if int(job["id"]) == queued]
+
+    estimate = estimate_job_timing(db, jobs[0], files[source_id])
+
+    assert estimate["eta_seconds"] >= 30
+    assert "glm-ocr" in estimate["timing_basis"]
+
+
 def test_estimate_job_timing_uses_live_progress_for_running_job(tmp_path: Path):
     db = RagSyncDb(tmp_path / "state.sqlite")
     db.migrate()
@@ -727,6 +823,181 @@ def test_estimate_job_timing_uses_live_progress_for_running_job(tmp_path: Path):
 
     assert estimate["eta_seconds"] == 420
     assert estimate["eta_label"] == "7m remaining"
+
+
+def test_estimate_job_timing_uses_glm_ocr_page_rate_for_live_progress(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    completed_source = _source(
+        db,
+        tmp_path,
+        "completed.pdf",
+        2_000_000,
+        "book",
+        "pdf",
+        page_count=100,
+    )
+    running_source = _source(
+        db,
+        tmp_path,
+        "running.pdf",
+        2_000_000,
+        "book",
+        "pdf",
+        page_count=100,
+    )
+    run_id = db.create_pipeline_run(completed_source, "quant-books", "book", "glm-ocr", "sync_file")
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=completed_source,
+        stage="convert",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=1_000.0,
+        error_summary="",
+    )
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=completed_source,
+        stage="upload",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=20.0,
+        error_summary="",
+    )
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=completed_source,
+        stage="parse",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=30.0,
+        error_summary="",
+    )
+    running_job = {
+        "id": 1,
+        "kind": "sync_file",
+        "status": "running",
+        "source_file_id": running_source,
+        "started_at": "2026-06-26 10:00:00",
+        "progress": 0.5,
+        "live_stage": "convert",
+        "live_progress_pages_done": 50,
+        "live_progress_page_count": 100,
+        "live_progress_percent": 50,
+    }
+    running_row = next(row for row in db.list_source_files() if int(row["id"]) == running_source)
+
+    estimate = estimate_job_timing(
+        db,
+        running_job,
+        running_row,
+        now="2026-06-26 10:01:00",
+    )
+
+    assert estimate["eta_seconds"] == 550
+    assert estimate["eta_label"] == "9m remaining"
+    assert estimate["timing_basis"] == (
+        "convert+book+pdf+page-rate+glm-ocr-live-pages -> "
+        "upload+book+pdf+26-100p+1-10MB+glm-ocr -> "
+        "parse+book+pdf+26-100p+1-10MB+glm-ocr"
+    )
+
+
+def test_live_glm_ocr_eta_ignores_stale_marker_artifact(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    completed_source = _source(
+        db,
+        tmp_path,
+        "completed.pdf",
+        2_000_000,
+        "book",
+        "pdf",
+        page_count=100,
+    )
+    running_source = _source(
+        db,
+        tmp_path,
+        "running.pdf",
+        2_000_000,
+        "book",
+        "pdf",
+        page_count=100,
+    )
+    stale_artifact = tmp_path / "old-marker.md"
+    stale_artifact.write_text("# old\n", encoding="utf-8")
+    db.add_artifact(
+        source_file_id=running_source,
+        parser="marker",
+        output_path=str(stale_artifact),
+        output_sha256="abc",
+        quality_status="clean",
+        warnings_json="[]",
+    )
+    run_id = db.create_pipeline_run(completed_source, "quant-books", "book", "glm-ocr", "sync_file")
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=completed_source,
+        stage="convert",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=1_000.0,
+        error_summary="",
+    )
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=completed_source,
+        stage="upload",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=20.0,
+        error_summary="",
+    )
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=completed_source,
+        stage="parse",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=30.0,
+        error_summary="",
+    )
+    running_job = {
+        "id": 1,
+        "kind": "sync_file",
+        "status": "running",
+        "source_file_id": running_source,
+        "started_at": "2026-06-26 10:00:00",
+        "progress": 0.5,
+        "live_stage": "convert",
+        "live_progress_pages_done": 50,
+        "live_progress_page_count": 100,
+        "live_progress_percent": 50,
+    }
+    running_row = db.list_file_summaries(profile_names={"quant-books"})[1]
+
+    estimate = estimate_job_timing(
+        db,
+        running_job,
+        running_row,
+        now="2026-06-26 10:01:00",
+    )
+
+    assert estimate["timing_basis"].startswith("convert+book+pdf+page-rate+glm-ocr-live-pages")
+    assert estimate["eta_seconds"] == 550
 
 
 def test_estimate_queue_timing_reports_unknown_when_no_job_is_estimable(tmp_path: Path):
@@ -889,9 +1160,9 @@ def test_estimate_job_timing_only_applies_elapsed_heuristic_to_current_stage(
     assert estimate["eta_seconds"] == 210
     assert estimate["eta_label"] == "3m remaining"
     assert estimate["timing_basis"] == (
-        "convert+book+pdf+1-10MB+marker-elapsed"
-        " -> upload+book+pdf+1-10MB+marker"
-        " -> parse+book+pdf+1-10MB+marker"
+        "convert+book+pdf+1-10MB-elapsed"
+        " -> upload+book+pdf+1-10MB"
+        " -> parse+book+pdf+1-10MB"
     )
 
 
@@ -940,7 +1211,70 @@ def test_estimate_job_timing_uses_page_count_for_pdf_convert_stage(tmp_path: Pat
     estimate = estimate_job_timing(db, queued_job, target_row)
 
     assert estimate["eta_seconds"] == 150
-    assert estimate["timing_basis"].startswith("convert+book+pdf+page-rate+marker")
+    assert estimate["timing_basis"].startswith("convert+book+pdf+page-rate+generic")
+
+
+def test_queued_sync_file_eta_includes_convert_even_with_existing_artifact(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = _source(db, tmp_path, "rerun.pdf", 2_000_000, "book", "pdf", page_count=100)
+    artifact = tmp_path / "old.md"
+    artifact.write_text("# old\n", encoding="utf-8")
+    db.add_artifact(
+        source_file_id=source_id,
+        parser="marker",
+        output_path=str(artifact),
+        output_sha256="abc",
+        quality_status="clean",
+        warnings_json="[]",
+    )
+    run_id = db.create_pipeline_run(source_id, "quant-books", "book", "glm-ocr", "sync_file")
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=source_id,
+        stage="convert",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=200.0,
+        error_summary="",
+    )
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=source_id,
+        stage="upload",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=20.0,
+        error_summary="",
+    )
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=source_id,
+        stage="parse",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=30.0,
+        error_summary="",
+    )
+    queued_job = {
+        "id": 1,
+        "kind": "sync_file",
+        "status": "queued",
+        "source_file_id": source_id,
+        "progress": 0.0,
+    }
+    source_row = next(row for row in db.list_source_files() if int(row["id"]) == source_id)
+
+    estimate = estimate_job_timing(db, queued_job, source_row)
+
+    assert estimate["eta_seconds"] == 250
+    assert estimate["timing_basis"].startswith("convert+book+pdf+page-rate")
 
 
 def test_estimate_job_timing_caps_heuristic_progress_for_clearscan_marker_jobs(tmp_path: Path):
@@ -1081,6 +1415,53 @@ def test_estimate_queue_timing_passes_shared_now_to_running_jobs(tmp_path: Path)
 
     assert estimate["seconds"] == 780
     assert estimate["label"] == "13m remaining"
+
+
+def test_estimate_queue_timing_includes_glm_ocr_api_cost_from_usage_history(tmp_path: Path):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    history_source = _source(db, tmp_path, "history.pdf", 5_000_000, "book", "pdf", page_count=100)
+    queued_source = _source(db, tmp_path, "queued.pdf", 6_000_000, "book", "pdf", page_count=200)
+
+    db.record_usage_event(
+        provider="z-ai",
+        service="glm-ocr",
+        model="glm-ocr",
+        source_file_id=history_source,
+        tokens=50_000,
+        cost_usd=0.0015,
+        metadata={"page_count": 100},
+    )
+    run_id = db.create_pipeline_run(history_source, "quant-books", "book", "glm-ocr", "sync_file")
+    db.record_stage_event(
+        run_id=run_id,
+        job_id=None,
+        source_file_id=history_source,
+        stage="convert",
+        status="completed",
+        progress=1.0,
+        progress_message="done",
+        duration_seconds=100.0,
+        error_summary="",
+    )
+
+    jobs = [
+        {
+            "id": 1,
+            "kind": "sync_file",
+            "status": "queued",
+            "source_file_id": queued_source,
+            "progress": 0.0,
+        },
+    ]
+    files = {int(row["id"]): row for row in db.list_source_files()}
+
+    estimate = estimate_queue_timing(db, jobs, files)
+
+    assert estimate["estimated_api_tokens"] == 100_000
+    assert estimate["estimated_api_cost_usd"] == 0.003
+    assert estimate["estimated_api_cost_label"] == "$0.003000 estimated GLM OCR"
+    assert estimate["api_cost_basis"] == "z-ai glm-ocr median 500 tokens/page"
 
 
 def test_estimate_queue_timing_marks_mixed_known_and_unknown_queue_partial(tmp_path: Path):

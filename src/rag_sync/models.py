@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 class ParserMode(StrEnum):
+    GLM_OCR = "glm-ocr"
     MARKER = "marker"
     MINERU = "mineru"
     PASSTHROUGH = "passthrough"

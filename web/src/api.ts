@@ -63,6 +63,10 @@ export type QueueStatus = {
     confidence: string;
     throughput_label: string;
     estimated_finish_at?: string | null;
+    estimated_api_tokens?: number;
+    estimated_api_cost_usd?: number;
+    estimated_api_cost_label?: string;
+    api_cost_basis?: string;
   };
   eta?: {
     seconds?: number | null;
@@ -70,9 +74,14 @@ export type QueueStatus = {
     confidence: string;
     throughput_label: string;
     estimated_finish_at?: string | null;
+    estimated_api_tokens?: number;
+    estimated_api_cost_usd?: number;
+    estimated_api_cost_label?: string;
+    api_cost_basis?: string;
   };
   active?: JobRecord | null;
   system?: Record<string, SystemMetric>;
+  usage?: UsageSummary;
 };
 
 export type JobStage = {
@@ -112,9 +121,73 @@ export type SystemMetric = {
   detail?: string;
 };
 
-export type RetrievalQuery = {
-  id: string;
-  question: string;
+export type UsageProviderSummary = {
+  tracked: boolean;
+  provider: string;
+  label: string;
+  tokens: number;
+  calls: number;
+  cost_usd: number;
+  total_credits?: number;
+  total_usage?: number;
+  remaining_credits?: number;
+  note?: string;
+};
+
+export type UsageSummary = {
+  total_tokens: number;
+  total_cost_usd: number;
+  providers: Record<string, UsageProviderSummary>;
+  items: Array<{
+    provider: string;
+    service: string;
+    model: string;
+    calls: number;
+    tokens: number;
+    cost_usd: number;
+  }>;
+};
+
+export type DatasetCoverage = {
+  file_count: number;
+  indexed_documents: number;
+  parsed_documents: number;
+  stuck_documents: number;
+  failed_documents: number;
+  chunk_count: number;
+};
+
+export type DatasetProfileSummary = {
+  name: string;
+  parser_mode: string;
+  source_type: string;
+  source_paths: string[];
+  file_count: number;
+};
+
+export type DatasetDrift = {
+  field: string;
+  label: string;
+  expected: string | number | boolean | null;
+  actual: string | number | boolean | null;
+};
+
+export type DatasetSummary = {
+  name: string;
+  exists: boolean;
+  protected: boolean;
+  coverage: DatasetCoverage;
+  profiles: DatasetProfileSummary[];
+  drift: DatasetDrift[];
+  remote?: {
+    id: string;
+    document_count?: number | null;
+  } | null;
+};
+
+export type DatasetOverviewResponse = {
+  datasets: DatasetSummary[];
+  remote_error: string | null;
 };
 
 export type AppSettings = {
@@ -140,6 +213,7 @@ export type AppSettings = {
     }
   >;
   profiles: Profile[];
+  usage?: UsageSummary;
 };
 
 export type ImportBatchValidationStatus =
@@ -385,14 +459,12 @@ export async function bulkEnqueueJobs(
   return (await response.json()) as { count: number; job_ids: number[]; source_file_ids?: number[] };
 }
 
-export async function fetchQuerySet(name: string): Promise<RetrievalQuery[]> {
-  const response = await fetch(`/api/retrieval/query-sets/${encodeURIComponent(name)}`);
+export async function fetchDatasets(): Promise<DatasetOverviewResponse> {
+  const response = await fetch('/api/datasets', noStore);
   if (!response.ok) {
-    throw new Error(`Failed to fetch query set ${name}: ${response.status}`);
+    throw new Error(`Failed to fetch datasets: ${response.status}`);
   }
-
-  const data = (await response.json()) as { queries?: RetrievalQuery[] };
-  return data.queries ?? [];
+  return (await response.json()) as DatasetOverviewResponse;
 }
 
 export async function previewImportBatch(

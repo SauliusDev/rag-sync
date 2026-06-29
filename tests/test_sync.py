@@ -17,6 +17,7 @@ from rag_sync.sync import (
     output_path_for,
     parse_uploaded_document,
     persist_scan,
+    refresh_ragflow_documents,
     restart_ragflow_document,
     upload_latest_artifact,
 )
@@ -62,9 +63,14 @@ def _profile(source_dir: Path, source_type: str = "article") -> Profile:
     )
 
 
-def _add_source(db: RagSyncDb, source_file: Path, source_type: str = "article") -> int:
+def _add_source(
+    db: RagSyncDb,
+    source_file: Path,
+    source_type: str = "article",
+    profile_name: str = "quant-articles",
+) -> int:
     return db.upsert_source_file(
-        profile_name="quant-articles",
+        profile_name=profile_name,
         source_path=str(source_file),
         source_type=source_type,
         extension=source_file.suffix.lstrip("."),
@@ -220,6 +226,52 @@ def test_convert_source_file_falls_back_to_mineru_for_pdf_books(
     assert row["state"] == "converted"
 
 
+def test_convert_source_file_uses_glm_ocr_profile_default(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp: Path,
+):
+    source_dir = project_tmp / "books"
+    source_dir.mkdir()
+    source_file = source_dir / "book.pdf"
+    source_file.write_bytes(b"pdf")
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    source_id = _add_source(
+        db,
+        source_file,
+        source_type="book",
+        profile_name="quant-books",
+    )
+    profile = Profile(
+        name="quant-books",
+        source_paths=(source_dir,),
+        file_types=("pdf",),
+        parser_mode=ParserMode.GLM_OCR,
+        target_dataset="quant-books",
+        source_type="book",
+    )
+    monkeypatch.chdir(project_tmp)
+    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+
+    class WorkingGlmOcr:
+        def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("# glm body\n\n$x + y$\n", encoding="utf-8")
+            return ParserResult("glm-ocr", output_path, "", "")
+
+    monkeypatch.setattr("rag_sync.sync._parser_for_name", lambda parser_name: WorkingGlmOcr())
+
+    output_path = convert_source_file(db, source_id)
+
+    artifact = db.latest_artifact_for_source(source_id)
+    assert output_path == (
+        DEFAULT_DATA_DIR
+        / f"outputs/quant-books/glm-ocr/book-{_path_hash(source_file)}.md"
+    )
+    assert artifact is not None
+    assert artifact["parser"] == "glm-ocr"
+
+
 def test_convert_source_file_falls_back_when_marker_output_is_empty(
     monkeypatch: pytest.MonkeyPatch,
     project_tmp: Path,
@@ -336,7 +388,9 @@ def test_convert_source_file_logs_marker_fallback_to_mineru(
     assert "conversion.failed" in events
     assert "conversion.fallback.started" in events
     assert "conversion.fallback.completed" in events
-    fallback = [record for record in records if record["event"] == "conversion.fallback.started"][-1]
+    fallback = [
+        record for record in records if record["event"] == "conversion.fallback.started"
+    ][-1]
     assert fallback["from_parser"] == "marker"
     assert fallback["to_parser"] == "mineru"
     assert fallback["source_file_id"] == source_id
@@ -385,10 +439,12 @@ class FakeRagFlowClient:
         dataset: dict[str, object] | None = None,
         uploaded: dict[str, object] | None = None,
         parse_response: dict[str, object] | None = None,
+        documents: list[dict[str, object]] | None = None,
     ):
         self.dataset = dataset or {"id": "dataset-id", "name": "Dataset Name"}
         self.uploaded = uploaded or {"id": "document-id", "name": "Output.md"}
         self.parse_response = parse_response or {"code": 0}
+        self.documents = documents or []
         self.uploaded_paths: list[Path] = []
         self.parsed: list[tuple[str, list[str]]] = []
         self.stopped: tuple[str, list[str]] | None = None
@@ -420,6 +476,10 @@ class FakeRagFlowClient:
     ) -> dict[str, object]:
         self.deleted = (dataset_id, document_ids)
         return {"code": 0}
+
+    async def list_documents(self, dataset_id: str) -> list[dict[str, object]]:
+        self.listed_dataset_id = dataset_id
+        return list(self.documents)
 
 
 def _converted_source_with_artifact(project_tmp: Path) -> tuple[RagSyncDb, int, Path]:
@@ -640,3 +700,40 @@ def test_restart_ragflow_document_reuses_latest_artifact(
     assert client.parsed == [("dataset-id", ["new-doc"])]
     assert result["document_id"] == "new-doc"
     assert row["document_id"] == "new-doc"
+
+
+def test_refresh_ragflow_documents_updates_local_status_from_remote(project_tmp: Path):
+    db, source_id, _ = _converted_source_with_artifact(project_tmp)
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-id",
+        dataset_name="Dataset Name",
+        document_id="document-id",
+        document_name="Output.md",
+        upload_status="uploaded",
+        parse_status="parsing",
+    )
+    client = FakeRagFlowClient(
+        documents=[
+            {
+                "id": "document-id",
+                "name": "Output.md",
+                "progress": 1.0,
+                "run": "DONE",
+                "chunk_count": 12,
+                "token_count": 345,
+            }
+        ]
+    )
+
+    refreshed = asyncio.run(refresh_ragflow_documents(db, client))
+
+    with db.connect() as conn:
+        doc = conn.execute("SELECT * FROM ragflow_documents WHERE source_file_id = ?", (source_id,)).fetchone()
+        source = conn.execute("SELECT state FROM source_files WHERE id = ?", (source_id,)).fetchone()
+    assert refreshed == 1
+    assert client.listed_dataset_id == "dataset-id"
+    assert doc["parse_status"] == "parsed"
+    assert doc["chunk_count"] == 12
+    assert doc["token_count"] == 345
+    assert source["state"] == "parsed"

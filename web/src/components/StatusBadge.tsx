@@ -9,7 +9,7 @@ export function StatusBadgeContent({ status }: { status: QueueStatus | null }) {
   const metrics = status?.system ? Object.entries(status.system) : [];
 
   return (
-    <div className="status-badges" aria-label="System status">
+    <div className="status-badges" aria-label="System status" role="status" aria-live="polite">
       <div className="status-badge">
         {status?.queue?.paused ? 'Paused · ' : ''}
         {status?.label ?? 'Loading status'}

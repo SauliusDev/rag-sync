@@ -238,6 +238,48 @@ def test_upsert_ragflow_document_inserts_updates_single_row_and_marks_uploaded(
     assert row["state"] == "uploaded"
 
 
+def test_usage_events_are_summarized_by_provider_service_and_model(project_tmp: Path):
+    db = RagSyncDb(project_tmp / "state.sqlite")
+    db.migrate()
+    file_id = db.upsert_source_file(
+        "quant-papers", "/tmp/paper.pdf", "paper", "pdf", "abc", 123, 1.0, SourceState.NEW
+    )
+
+    db.record_usage_event(
+        provider="z-ai",
+        service="glm-ocr",
+        model="glm-ocr",
+        source_file_id=file_id,
+        tokens=1000,
+        cost_usd=0.00003,
+        metadata={"page_count": 2},
+    )
+    db.record_usage_event(
+        provider="z-ai",
+        service="glm-ocr",
+        model="glm-ocr",
+        source_file_id=file_id,
+        tokens=2000,
+        cost_usd=0.00006,
+        metadata={"page_count": 3},
+    )
+
+    summary = db.usage_summary()
+
+    assert summary["total_cost_usd"] == 0.00009
+    assert summary["total_tokens"] == 3000
+    assert summary["items"] == [
+        {
+            "provider": "z-ai",
+            "service": "glm-ocr",
+            "model": "glm-ocr",
+            "calls": 2,
+            "tokens": 3000,
+            "cost_usd": 0.00009,
+        }
+    ]
+
+
 def test_migrate_creates_pipeline_history_tables(project_tmp: Path):
     db = RagSyncDb(project_tmp / "state.sqlite")
     db.migrate()

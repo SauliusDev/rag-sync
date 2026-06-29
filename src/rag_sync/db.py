@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -79,6 +80,21 @@ CREATE TABLE IF NOT EXISTS job_events (
   level TEXT NOT NULL,
   message TEXT NOT NULL,
   data_json TEXT NOT NULL DEFAULT '{}',
+  FOREIGN KEY(job_id) REFERENCES jobs(id)
+);
+
+CREATE TABLE IF NOT EXISTS usage_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  service TEXT NOT NULL,
+  model TEXT NOT NULL,
+  source_file_id INTEGER,
+  job_id INTEGER,
+  tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(source_file_id) REFERENCES source_files(id),
   FOREIGN KEY(job_id) REFERENCES jobs(id)
 );
 
@@ -209,6 +225,31 @@ class RagSyncDb:
             if "pdf_producer" not in columns:
                 conn.execute(
                     "ALTER TABLE source_files ADD COLUMN pdf_producer TEXT NOT NULL DEFAULT ''"
+                )
+            tables = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "usage_events" not in tables:
+                conn.execute(
+                    """
+                    CREATE TABLE usage_events (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      provider TEXT NOT NULL,
+                      service TEXT NOT NULL,
+                      model TEXT NOT NULL,
+                      source_file_id INTEGER,
+                      job_id INTEGER,
+                      tokens INTEGER NOT NULL DEFAULT 0,
+                      cost_usd REAL NOT NULL DEFAULT 0,
+                      metadata_json TEXT NOT NULL DEFAULT '{}',
+                      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY(source_file_id) REFERENCES source_files(id),
+                      FOREIGN KEY(job_id) REFERENCES jobs(id)
+                    )
+                    """
                 )
 
     def upsert_source_file(
@@ -502,6 +543,113 @@ class RagSyncDb:
             if row is None:
                 raise RuntimeError("pipeline stage event insert did not return an id")
             return int(row["id"])
+
+    def record_usage_event(
+        self,
+        *,
+        provider: str,
+        service: str,
+        model: str,
+        source_file_id: int | None = None,
+        job_id: int | None = None,
+        tokens: int = 0,
+        cost_usd: float = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO usage_events (
+                  provider, service, model, source_file_id, job_id,
+                  tokens, cost_usd, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    provider,
+                    service,
+                    model,
+                    source_file_id,
+                    job_id,
+                    int(tokens),
+                    float(cost_usd),
+                    json.dumps(metadata or {}, sort_keys=True),
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("usage event insert did not return an id")
+            return int(row["id"])
+
+    def usage_summary(self) -> dict[str, Any]:
+        with self.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                  provider,
+                  service,
+                  model,
+                  COUNT(*) AS calls,
+                  COALESCE(SUM(tokens), 0) AS tokens,
+                  COALESCE(SUM(cost_usd), 0) AS cost_usd
+                FROM usage_events
+                GROUP BY provider, service, model
+                ORDER BY provider, service, model
+                """
+            ).fetchall()
+        items = [
+            {
+                "provider": str(row["provider"]),
+                "service": str(row["service"]),
+                "model": str(row["model"]),
+                "calls": int(row["calls"]),
+                "tokens": int(row["tokens"]),
+                "cost_usd": round(float(row["cost_usd"]), 8),
+            }
+            for row in rows
+        ]
+        total_tokens = sum(int(item["tokens"]) for item in items)
+        total_cost = round(sum(float(item["cost_usd"]) for item in items), 8)
+        providers = {
+            "z-ai": {
+                "tracked": True,
+                "provider": "z-ai",
+                "label": "Z API GLM OCR",
+                "tokens": 0,
+                "calls": 0,
+                "cost_usd": 0,
+            },
+            "openrouter": {
+                "tracked": False,
+                "provider": "openrouter",
+                "label": "OpenRouter chunking",
+                "tokens": 0,
+                "calls": 0,
+                "cost_usd": 0,
+                "note": "RAGFlow does not return OpenRouter usage to rag-sync.",
+            },
+        }
+        for item in items:
+            provider = str(item["provider"])
+            current = providers.setdefault(
+                provider,
+                {
+                    "tracked": True,
+                    "provider": provider,
+                    "label": provider,
+                    "tokens": 0,
+                    "calls": 0,
+                    "cost_usd": 0,
+                },
+            )
+            current["tokens"] = int(current["tokens"]) + int(item["tokens"])
+            current["calls"] = int(current["calls"]) + int(item["calls"])
+            current["cost_usd"] = round(float(current["cost_usd"]) + float(item["cost_usd"]), 8)
+        return {
+            "total_tokens": total_tokens,
+            "total_cost_usd": total_cost,
+            "providers": providers,
+            "items": items,
+        }
 
     def recent_stage_events(self, source_file_id: int, limit: int = 20) -> list[dict[str, Any]]:
         with self.session() as conn:

@@ -1,5 +1,5 @@
 import { RefreshCcw, Upload } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 
 import {
   importBatch,
@@ -169,6 +169,7 @@ export function ImportBatchDialog({
   initialSelectedRelpaths,
   initialReason = '',
 }: ImportBatchDialogProps) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const [batchDir, setBatchDir] = useState(initialBatchDir);
   const [preview, setPreview] = useState<ImportBatchPreviewResponse | null>(initialPreview);
   const [previewBatchDir, setPreviewBatchDir] = useState(
@@ -201,6 +202,50 @@ export function ImportBatchDialog({
   const selectedMismatchCount = selectedFiles.filter((file) =>
     forceableStatuses.has(file.validation_status),
   ).length;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogRef.current?.focus();
+
+    return () => {
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+
+    if (event.key !== 'Tab') {
+      return;
+    }
+
+    const focusable = Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    ).filter((element) => !element.hasAttribute('hidden') && element.tabIndex >= 0);
+
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialogRef.current?.focus();
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   function toggleSelection(relpath: string, checked: boolean) {
     setSelectedRelpaths((current) => {
@@ -286,17 +331,20 @@ export function ImportBatchDialog({
   return (
     <div className="dialog-backdrop" role="presentation">
       <div
+        ref={dialogRef}
         className="dialog-shell import-batch-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Import batch"
+        aria-labelledby="import-batch-title"
+        tabIndex={-1}
+        onKeyDown={handleDialogKeyDown}
       >
         <div className="dialog-header">
           <div>
-            <h2>Import batch</h2>
+            <h2 id="import-batch-title">Import batch</h2>
             <p>Preview a transferred Marker batch and import only the rows you approve.</p>
           </div>
-          <button className="action-button" type="button" onClick={onClose}>
+          <button className="action-button" type="button" onClick={onClose} aria-label="Close import batch dialog">
             Close
           </button>
         </div>
@@ -333,11 +381,15 @@ export function ImportBatchDialog({
           </button>
         </div>
 
-        {error ? <p className="inline-error">{error}</p> : null}
+        {error ? (
+          <p className="inline-error" role="alert">
+            {error}
+          </p>
+        ) : null}
 
         {activePreview ? (
           <>
-            <div className="import-batch-summary">
+            <dl className="import-batch-summary">
               <div className="import-batch-card">
                 <dt>Batch</dt>
                 <dd>{activePreview.batch_id}</dd>
@@ -360,7 +412,7 @@ export function ImportBatchDialog({
                   {formatCount(activePreview.summary.hash_mismatch, 'mismatch')}
                 </dd>
               </div>
-            </div>
+            </dl>
 
             <div className="dialog-section dialog-section-compact">
               <div className="bulk-actions" aria-label="Batch selection actions">
@@ -387,11 +439,11 @@ export function ImportBatchDialog({
               <table className="settings-table import-batch-table">
                 <thead>
                   <tr>
-                    <th>Pick</th>
-                    <th>File</th>
-                    <th>Remote</th>
-                    <th>Validation</th>
-                    <th>Markdown</th>
+                    <th scope="col">Pick</th>
+                    <th scope="col">File</th>
+                    <th scope="col">Remote</th>
+                    <th scope="col">Validation</th>
+                    <th scope="col">Markdown</th>
                   </tr>
                 </thead>
                 <tbody>

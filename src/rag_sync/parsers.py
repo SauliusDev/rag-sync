@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -10,24 +11,22 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from threading import Lock
 
 from pypdf import PdfReader
 
 from rag_sync.artifacts import make_upload_markdown, make_upload_markdown_from_text
+from rag_sync.glm_ocr import convert_pdf_with_glm_ocr
 from rag_sync.ldd import log_event
 
 MARKER_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/marker/bin/marker"
 MINERU_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/mineru/bin/mineru"
 MARKER_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "1200"))
 MINERU_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MINERU_TIMEOUT_SECONDS", "1200"))
-MARKER_LOW_MEMORY_OCR = os.environ.get("RAG_SYNC_MARKER_LOW_MEMORY_OCR", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
+MARKER_LOW_MEMORY_OCR = (
+    os.environ.get("RAG_SYNC_MARKER_LOW_MEMORY_OCR", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
 _active_parser_procs: set[subprocess.Popen[str]] = set()
 _active_parser_procs_lock = Lock()
 
@@ -539,3 +538,23 @@ class MinerUParser:
             sha256=sha256,
             timeout_seconds=MINERU_TIMEOUT_SECONDS,
         )
+
+
+class GlmOcrParser:
+    name = "glm-ocr"
+
+    def convert(
+        self,
+        source_path: Path,
+        output_path: Path,
+        source_type: str,
+        sha256: str,
+        pdf_producer: str = "",
+    ) -> ParserResult:
+        convert_pdf_with_glm_ocr(
+            source_path=source_path,
+            output_path=output_path,
+            source_type=source_type,
+            source_sha256=sha256,
+        )
+        return ParserResult(self.name, output_path, "", "")

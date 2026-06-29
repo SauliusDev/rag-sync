@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -19,6 +20,7 @@ from rag_sync.db import RagSyncDb
 from rag_sync.import_manifest import import_manifest_batch, preview_manifest_batch
 from rag_sync.ldd import log_event
 from rag_sync.history import (
+    apply_live_glm_ocr_progress,
     estimate_job_timing,
     estimate_queue_timing,
     format_eta_seconds,
@@ -35,11 +37,15 @@ from rag_sync.sync import (
     delete_ragflow_document,
     parse_uploaded_document,
     persist_scan,
+    refresh_ragflow_documents,
     restart_ragflow_document,
     upload_latest_artifact,
 )
 
 logger = logging.getLogger(__name__)
+OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+OPENROUTER_USAGE_CACHE_TTL_SECONDS = 60
+_openrouter_usage_cache: tuple[float, dict[str, object]] | None = None
 
 
 class ConvertRequest(BaseModel):
@@ -97,11 +103,44 @@ def infer_job_stage(
         else "marker"
     )
     parser_label = "Marker conversion" if parser_name == "marker" else f"{parser_name} conversion"
+    if parser_name == "glm-ocr":
+        parser_label = "GLM OCR conversion"
+    artifact_created_at = (
+        str(artifact.get("created_at", ""))
+        if isinstance(artifact, dict) and artifact.get("created_at")
+        else ""
+    )
+    job_started_at = str(job.get("started_at") or "")
+    artifact_is_stale_for_job = (
+        bool(artifact_created_at)
+        and bool(job_started_at)
+        and artifact_created_at < job_started_at
+    )
 
     if status == "queued":
         return {"key": "queued", "label": "Queued", "status": "queued", "progress": 0.0}
 
+    if job.get("live_stage") == "convert":
+        return {
+            "key": "convert",
+            "label": "GLM OCR conversion",
+            "status": status,
+            "progress": float(job.get("progress", 0) or 0),
+            "detail": str(job.get("live_progress_detail", "")),
+        }
+
     if kind in {JobKind.CONVERT.value, JobKind.SYNC_FILE.value} and not artifact:
+        return {
+            "key": "convert",
+            "label": parser_label,
+            "status": status,
+            "progress": float(job.get("progress", 0) or 0),
+        }
+    if (
+        status == "failed"
+        and kind in {JobKind.CONVERT.value, JobKind.SYNC_FILE.value}
+        and (not artifact or artifact_is_stale_for_job)
+    ):
         return {
             "key": "convert",
             "label": parser_label,
@@ -184,10 +223,12 @@ def enrich_jobs(
         item["source_type"] = (
             str(file_row.get("source_type", "")) if isinstance(file_row, dict) else ""
         )
+        if isinstance(file_row, dict):
+            item = apply_live_glm_ocr_progress(item, file_row)
         item["queue_position"] = (
             0 if str(job.get("status")) != "queued" else queued_positions.get(int(job["id"]), 0)
         )
-        item["stage"] = infer_job_stage(job, file_row)
+        item["stage"] = infer_job_stage(item, file_row)
         enriched.append(item)
     status_rank = {"running": 0, "queued": 1, "failed": 2, "completed": 3, "canceled": 4}
 
@@ -394,6 +435,116 @@ def read_system_metrics() -> dict[str, dict[str, object]]:
     return metrics
 
 
+def read_openrouter_api_key(env_file: Path = Path(".env")) -> str | None:
+    value = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if value:
+        return value
+    if not env_file.exists():
+        return None
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", 1)
+        if key.strip() == "OPENROUTER_API_KEY":
+            return raw_value.strip().strip('"').strip("'") or None
+    return None
+
+
+def openrouter_account_usage(now: float | None = None) -> dict[str, object]:
+    global _openrouter_usage_cache
+    current_time = time.monotonic() if now is None else now
+    if (
+        _openrouter_usage_cache is not None
+        and current_time - _openrouter_usage_cache[0] < OPENROUTER_USAGE_CACHE_TTL_SECONDS
+    ):
+        return dict(_openrouter_usage_cache[1])
+
+    key = read_openrouter_api_key()
+    if not key:
+        return {
+            "tracked": False,
+            "provider": "openrouter",
+            "label": "OpenRouter account",
+            "tokens": 0,
+            "calls": 0,
+            "cost_usd": 0,
+            "note": "OPENROUTER_API_KEY is not set.",
+        }
+    try:
+        response = httpx.get(
+            OPENROUTER_CREDITS_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        total_credits = float(data.get("total_credits") or 0)
+        total_usage = float(data.get("total_usage") or 0)
+        usage = {
+            "tracked": True,
+            "provider": "openrouter",
+            "label": "OpenRouter account",
+            "tokens": 0,
+            "calls": 0,
+            "cost_usd": round(total_usage, 8),
+            "total_credits": round(total_credits, 8),
+            "total_usage": round(total_usage, 8),
+            "remaining_credits": round(max(0.0, total_credits - total_usage), 8),
+            "note": "Account-level usage from OpenRouter credits API.",
+        }
+        _openrouter_usage_cache = (current_time, usage)
+        log_event(
+            "openrouter.usage.fetched",
+            "ok",
+            total_credits=usage["total_credits"],
+            total_usage=usage["total_usage"],
+            remaining_credits=usage["remaining_credits"],
+        )
+        return dict(usage)
+    except Exception as exc:
+        log_event(
+            "openrouter.usage.fetch_failed",
+            "error",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return {
+            "tracked": False,
+            "provider": "openrouter",
+            "label": "OpenRouter account",
+            "tokens": 0,
+            "calls": 0,
+            "cost_usd": 0,
+            "note": f"OpenRouter credits unavailable: {type(exc).__name__}",
+        }
+
+
+def usage_summary_with_openrouter(db: RagSyncDb) -> dict[str, object]:
+    summary = db.usage_summary()
+    providers = dict(summary["providers"])
+    openrouter = openrouter_account_usage()
+    previous_openrouter = providers.get("openrouter")
+    if (
+        isinstance(previous_openrouter, dict)
+        and not bool(openrouter.get("tracked"))
+        and int(previous_openrouter.get("tokens", 0) or 0) > 0
+    ):
+        openrouter = {**openrouter, **previous_openrouter}
+    providers["openrouter"] = openrouter
+    total_cost = sum(
+        float(provider.get("cost_usd", 0) or 0)
+        for provider in providers.values()
+        if isinstance(provider, dict) and bool(provider.get("tracked"))
+    )
+    summary["providers"] = providers
+    summary["total_cost_usd"] = round(total_cost, 8)
+    return summary
+
+
 def matches_file_filters(file_row: dict[str, object], filters: FileFilterRequest) -> bool:
     normalized = filters.query.strip().lower()
     artifact = file_row.get("artifact")
@@ -451,6 +602,89 @@ def serialize_profile(profile: Profile) -> dict[str, object]:
         "max_upload_workers": profile.max_upload_workers,
         "max_parse_workers": profile.max_parse_workers,
     }
+
+
+DATASET_DRIFT_FIELDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("chunk_method", "Chunk method", ("chunk_method",)),
+    ("chunk_token_num", "Chunk tokens", ("parser_config", "chunk_token_num")),
+    ("auto_keywords", "Auto keywords", ("parser_config", "auto_keywords")),
+    ("auto_questions", "Auto questions", ("parser_config", "auto_questions")),
+    ("toc_extraction", "TOC extraction", ("parser_config", "ext", "toc_extraction")),
+    ("use_parent_child", "Parent-child", ("parser_config", "parent_child", "use_parent_child")),
+)
+
+
+def dataset_nested_value(payload: dict[str, object], path: tuple[str, ...]) -> object | None:
+    current: object = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def build_dataset_drift(
+    expected: dict[str, object],
+    actual: dict[str, object],
+) -> list[dict[str, object]]:
+    drift: list[dict[str, object]] = []
+    for field, label, path in DATASET_DRIFT_FIELDS:
+        actual_value = dataset_nested_value(actual, path)
+        if actual_value is None:
+            continue
+        expected_value = dataset_nested_value(expected, path)
+        if expected_value == actual_value:
+            continue
+        drift.append(
+            {
+                "field": field,
+                "label": label,
+                "expected": expected_value,
+                "actual": actual_value,
+            }
+        )
+    return drift
+
+
+def build_dataset_coverage(files: list[dict[str, object]]) -> dict[str, int]:
+    coverage = {
+        "file_count": len(files),
+        "indexed_documents": 0,
+        "parsed_documents": 0,
+        "stuck_documents": 0,
+        "failed_documents": 0,
+        "chunk_count": 0,
+    }
+    for file_row in files:
+        ragflow = file_row.get("ragflow")
+        parse_status = ""
+        if isinstance(ragflow, dict):
+            coverage["indexed_documents"] += 1
+            parse_status = str(ragflow.get("parse_status") or "")
+            coverage["chunk_count"] += int(ragflow.get("chunk_count") or 0)
+        if parse_status == "parsed":
+            coverage["parsed_documents"] += 1
+        elif parse_status in {"parsing", "not_started"}:
+            coverage["stuck_documents"] += 1
+        if str(file_row.get("state") or "") == "failed" or parse_status in {
+            "failed",
+            "error",
+            "canceled",
+        }:
+            coverage["failed_documents"] += 1
+    return coverage
+
+
+def file_dataset_name(
+    file_row: dict[str, object],
+    profiles_by_name: dict[str, Profile],
+) -> str:
+    ragflow = file_row.get("ragflow")
+    if isinstance(ragflow, dict) and ragflow.get("dataset_name"):
+        return str(ragflow["dataset_name"])
+    profile_name = str(file_row.get("profile_name") or "")
+    profile = profiles_by_name.get(profile_name)
+    return profile.target_dataset if profile is not None else ""
 
 
 def create_app(
@@ -904,7 +1138,95 @@ def create_app(
             "protected_datasets": sorted(PROTECTED_DATASETS),
             "dataset_defaults": QUANT_DATASET_DEFAULTS,
             "profiles": profiles_payload,
+            "usage": usage_summary_with_openrouter(db),
         }
+
+    @app.get("/api/datasets")
+    def datasets() -> dict[str, object]:
+        profiles = load_configured_profiles() if profile_path.exists() else []
+        profiles_by_name = {profile.name: profile for profile in profiles}
+        files = db.list_file_summaries(
+            profile_names={profile.name for profile in profiles} if profiles else None
+        )
+        remote_error: str | None = None
+        remote_by_name: dict[str, dict[str, object]] = {}
+        try:
+            remote_datasets = asyncio.run(RagFlowClient().list_datasets())
+            remote_by_name = {
+                str(dataset.get("name") or ""): dataset
+                for dataset in remote_datasets
+                if str(dataset.get("name") or "")
+            }
+            log_event(
+                "datasets.overview.fetched",
+                "ok",
+                configured_count=len(profiles),
+                local_file_count=len(files),
+                remote_dataset_count=len(remote_by_name),
+            )
+        except Exception as exc:
+            remote_error = f"RAGFlow dataset metadata unavailable: {type(exc).__name__}: {exc}"
+            log_event(
+                "datasets.overview.fetch_failed",
+                "error",
+                configured_count=len(profiles),
+                local_file_count=len(files),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+        dataset_names = sorted(
+            {
+                *remote_by_name.keys(),
+                *(profile.target_dataset for profile in profiles),
+            }
+        )
+        datasets_payload: list[dict[str, object]] = []
+        for dataset_name in dataset_names:
+            expected = QUANT_DATASET_DEFAULTS.get(dataset_name, {})
+            remote = remote_by_name.get(dataset_name)
+            dataset_files = [
+                file_row
+                for file_row in files
+                if file_dataset_name(file_row, profiles_by_name) == dataset_name
+            ]
+            dataset_profiles = [
+                {
+                    "name": profile.name,
+                    "parser_mode": profile.parser_mode.value,
+                    "source_type": profile.source_type,
+                    "source_paths": [str(path) for path in profile.source_paths],
+                    "file_count": sum(
+                        1
+                        for file_row in dataset_files
+                        if str(file_row.get("profile_name") or "") == profile.name
+                    ),
+                }
+                for profile in profiles
+                if profile.target_dataset == dataset_name
+            ]
+            coverage = build_dataset_coverage(dataset_files)
+            datasets_payload.append(
+                {
+                    "name": dataset_name,
+                    "exists": remote is not None,
+                    "protected": dataset_name in PROTECTED_DATASETS,
+                    "coverage": coverage,
+                    "profiles": dataset_profiles,
+                    "drift": build_dataset_drift(expected, remote or {}),
+                    "remote": (
+                        {
+                            "id": str(remote.get("id") or ""),
+                            "document_count": remote.get("document_count")
+                            or remote.get("doc_num")
+                            or coverage["indexed_documents"],
+                        }
+                        if isinstance(remote, dict)
+                        else None
+                    ),
+                }
+            )
+        return {"datasets": datasets_payload, "remote_error": remote_error}
 
     @app.post("/api/scan/{profile_name}")
     def scan(profile_name: str) -> dict[str, int]:
@@ -923,10 +1245,12 @@ def create_app(
     @app.get("/api/files")
     def files() -> dict[str, list[dict[str, object]]]:
         profile_names = getattr(app.state, "profile_names", configured_profile_names())
+        asyncio.run(refresh_ragflow_documents(db))
         return {"files": db.list_file_summaries(profile_names=profile_names)}
 
     @app.get("/api/files/{source_file_id}")
     def file_detail(source_file_id: int) -> dict[str, object]:
+        asyncio.run(refresh_ragflow_documents(db))
         file_row = next(
             (
                 row
@@ -1010,6 +1334,7 @@ def create_app(
             "label": label,
             "active": active_job,
             "system": read_system_metrics(),
+            "usage": usage_summary_with_openrouter(db),
         }
 
     @app.post("/api/queue/pause")

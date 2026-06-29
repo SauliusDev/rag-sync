@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import rag_sync.api
 import rag_sync.queue
 from rag_sync import ldd
-from rag_sync.api import create_app
+from rag_sync.api import create_app, infer_job_stage
 from rag_sync.db import RagSyncDb
 from rag_sync.models import SourceState
 
@@ -137,7 +137,7 @@ def test_profiles_endpoint_returns_stable_error_for_bad_config(tmp_path: Path):
     assert response.json()["detail"].startswith("failed to load profiles:")
 
 
-def test_settings_endpoint_returns_runtime_and_dataset_defaults(tmp_path: Path):
+def test_settings_endpoint_returns_runtime_and_dataset_defaults(tmp_path: Path, monkeypatch):
     config = tmp_path / "profiles.toml"
     config.write_text(
         """
@@ -151,7 +151,22 @@ source_type = "book"
 """,
         encoding="utf-8",
     )
-    client = TestClient(create_app(profile_path=config))
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    monkeypatch.setattr(
+        rag_sync.api,
+        "openrouter_account_usage",
+        lambda: {
+            "tracked": False,
+            "provider": "openrouter",
+            "label": "OpenRouter account",
+            "tokens": 0,
+            "calls": 0,
+            "cost_usd": 0,
+            "note": "OPENROUTER_API_KEY is not set.",
+        },
+    )
+    client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
 
     response = client.get("/api/settings")
 
@@ -165,6 +180,235 @@ source_type = "book"
     assert data["dataset_defaults"]["quant-books"]["parser_config"]["auto_questions"] == 0
     assert data["dataset_defaults"]["quant-books"]["parser_config"]["chunk_token_num"] == 1000
     assert data["profiles"][0]["name"] == "quant-books"
+    assert data["usage"]["total_cost_usd"] == 0
+    assert data["usage"]["providers"]["openrouter"]["tracked"] is False
+
+
+def test_settings_endpoint_includes_openrouter_account_credits(tmp_path: Path, monkeypatch):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        """
+[[profiles]]
+name = "quant-books"
+source_paths = ["/atlas/books"]
+file_types = ["pdf"]
+parser_mode = "glm-ocr"
+target_dataset = "quant-books"
+source_type = "book"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+
+    monkeypatch.setattr(
+        rag_sync.api,
+        "openrouter_account_usage",
+        lambda: {
+            "tracked": True,
+            "provider": "openrouter",
+            "label": "OpenRouter account",
+            "tokens": 0,
+            "calls": 0,
+            "cost_usd": 46.24717676,
+            "total_credits": 60.0,
+            "total_usage": 46.24717676,
+            "remaining_credits": 13.75282324,
+            "note": "Account-level usage from OpenRouter credits API.",
+        },
+    )
+
+    client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
+
+    response = client.get("/api/settings")
+
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["total_cost_usd"] == 46.24717676
+    assert usage["providers"]["openrouter"]["tracked"] is True
+    assert usage["providers"]["openrouter"]["total_credits"] == 60.0
+    assert usage["providers"]["openrouter"]["remaining_credits"] == 13.75282324
+
+
+def test_failed_sync_conversion_error_keeps_conversion_stage_with_stale_artifact():
+    stage = infer_job_stage(
+        {
+            "kind": "sync_file",
+            "status": "failed",
+            "progress": 0,
+            "started_at": "2026-06-29 06:36:16",
+            "error_summary": "[Errno -3] Temporary failure in name resolution",
+        },
+        {
+            "artifact": {"parser": "glm-ocr", "created_at": "2026-06-28 20:11:16"},
+            "ragflow": None,
+        },
+    )
+
+    assert stage["key"] == "convert"
+    assert stage["label"] == "GLM OCR conversion"
+    assert stage["status"] == "failed"
+
+
+def test_datasets_endpoint_returns_drift_and_coverage(tmp_path: Path, monkeypatch):
+    config = tmp_path / "profiles.toml"
+    config.write_text(
+        """
+[[profiles]]
+name = "books-marker"
+source_paths = ["/atlas/books"]
+file_types = ["pdf"]
+parser_mode = "marker"
+target_dataset = "quant-books"
+source_type = "book"
+
+[[profiles]]
+name = "papers-glm"
+source_paths = ["/atlas/papers"]
+file_types = ["pdf"]
+parser_mode = "glm-ocr"
+target_dataset = "quant-papers"
+source_type = "paper"
+""",
+        encoding="utf-8",
+    )
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    parsed_id = db.upsert_source_file(
+        profile_name="books-marker",
+        source_path="/atlas/books/A.pdf",
+        source_type="book",
+        extension="pdf",
+        sha256="sha-a",
+        size_bytes=100,
+        mtime=1.0,
+        state=SourceState.PARSED,
+    )
+    failed_id = db.upsert_source_file(
+        profile_name="books-marker",
+        source_path="/atlas/books/B.pdf",
+        source_type="book",
+        extension="pdf",
+        sha256="sha-b",
+        size_bytes=120,
+        mtime=2.0,
+        state=SourceState.FAILED,
+    )
+    parsing_id = db.upsert_source_file(
+        profile_name="papers-glm",
+        source_path="/atlas/papers/C.pdf",
+        source_type="paper",
+        extension="pdf",
+        sha256="sha-c",
+        size_bytes=140,
+        mtime=3.0,
+        state=SourceState.UPLOADED,
+    )
+    db.upsert_ragflow_document(
+        source_file_id=parsed_id,
+        dataset_id="books-id",
+        dataset_name="quant-books",
+        document_id="doc-a",
+        document_name="A.md",
+        upload_status="uploaded",
+        parse_status="parsed",
+        chunk_count=11,
+        token_count=101,
+    )
+    db.upsert_ragflow_document(
+        source_file_id=failed_id,
+        dataset_id="books-id",
+        dataset_name="quant-books",
+        document_id="doc-b",
+        document_name="B.md",
+        upload_status="uploaded",
+        parse_status="failed",
+    )
+    db.upsert_ragflow_document(
+        source_file_id=parsing_id,
+        dataset_id="papers-id",
+        dataset_name="quant-papers",
+        document_id="doc-c",
+        document_name="C.md",
+        upload_status="uploaded",
+        parse_status="parsing",
+    )
+
+    class FakeRagFlowClient:
+        async def list_datasets(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "books-id",
+                    "name": "quant-books",
+                    "chunk_method": "qa",
+                    "parser_config": {
+                        "chunk_token_num": 1200,
+                        "auto_keywords": 1,
+                        "auto_questions": 0,
+                        "ext": {"toc_extraction": True},
+                        "parent_child": {"use_parent_child": False},
+                    },
+                },
+                {
+                    "id": "papers-id",
+                    "name": "quant-papers",
+                    "chunk_method": "naive",
+                    "parser_config": {
+                        "chunk_token_num": 900,
+                        "auto_keywords": 0,
+                        "auto_questions": 0,
+                        "ext": {"toc_extraction": False},
+                        "parent_child": {"use_parent_child": True},
+                    },
+                },
+            ]
+
+    monkeypatch.setattr(rag_sync.api, "RagFlowClient", FakeRagFlowClient)
+    client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
+
+    response = client.get("/api/datasets")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["remote_error"] is None
+    books = next(item for item in payload["datasets"] if item["name"] == "quant-books")
+    papers = next(item for item in payload["datasets"] if item["name"] == "quant-papers")
+
+    assert books["exists"] is True
+    assert books["coverage"] == {
+        "file_count": 2,
+        "indexed_documents": 2,
+        "parsed_documents": 1,
+        "stuck_documents": 0,
+        "failed_documents": 1,
+        "chunk_count": 11,
+    }
+    assert books["profiles"] == [
+        {
+            "name": "books-marker",
+            "parser_mode": "marker",
+            "source_type": "book",
+            "source_paths": ["/atlas/books"],
+            "file_count": 2,
+        }
+    ]
+    assert {item["field"] for item in books["drift"]} == {
+        "chunk_method",
+        "chunk_token_num",
+        "auto_keywords",
+        "toc_extraction",
+        "use_parent_child",
+    }
+
+    assert papers["coverage"] == {
+        "file_count": 1,
+        "indexed_documents": 1,
+        "parsed_documents": 0,
+        "stuck_documents": 1,
+        "failed_documents": 0,
+        "chunk_count": 0,
+    }
+    assert papers["drift"] == []
 
 
 def test_scan_endpoint_returns_404_for_unknown_profile(tmp_path: Path):
@@ -457,12 +701,32 @@ def test_jobs_endpoint_lists_persisted_jobs(tmp_path: Path):
     assert response.json()["jobs"][0]["kind"] == "convert"
 
 
-def test_status_endpoint_returns_queue_counts(tmp_path: Path):
+def test_status_endpoint_returns_queue_counts(tmp_path: Path, monkeypatch):
     db = RagSyncDb(tmp_path / "state.sqlite")
     db.migrate()
+    db.record_usage_event(
+        provider="z-ai",
+        service="glm-ocr",
+        model="glm-ocr",
+        tokens=1000,
+        cost_usd=0.00003,
+    )
     db.create_job("convert", source_file_id=None, profile_name="quant-books")
     running_id = db.create_job("parse", source_file_id=None, profile_name="quant-books")
     db.update_job_status(running_id, "running", progress=0.4)
+    monkeypatch.setattr(
+        rag_sync.api,
+        "openrouter_account_usage",
+        lambda: {
+            "tracked": False,
+            "provider": "openrouter",
+            "label": "OpenRouter account",
+            "tokens": 0,
+            "calls": 0,
+            "cost_usd": 0,
+            "note": "OPENROUTER_API_KEY is not set.",
+        },
+    )
     client = TestClient(create_app(db_factory=lambda: db))
 
     response = client.get("/api/status")
@@ -476,6 +740,8 @@ def test_status_endpoint_returns_queue_counts(tmp_path: Path):
         "paused": False,
     }
     assert "label" in response.json()
+    assert response.json()["usage"]["total_cost_usd"] == 0.00003
+    assert response.json()["usage"]["providers"]["z-ai"]["cost_usd"] == 0.00003
 
 
 def test_enqueue_job_endpoint_creates_job(tmp_path: Path):
@@ -1142,8 +1408,12 @@ source_type = "book"
         state=SourceState.NEW,
     )
 
+    conversion_started = threading.Event()
+    release_conversion = threading.Event()
+
     def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
-        time.sleep(0.3)
+        conversion_started.set()
+        release_conversion.wait(timeout=2)
         return tmp_path / "book.md"
 
     async def fake_upload(actual_db, source_file_id, client=None, profile_path=config):
@@ -1172,13 +1442,12 @@ source_type = "book"
             },
         )
         assert enqueue_response.status_code == 200
-        time.sleep(0.05)
-        start = time.perf_counter()
+        assert conversion_started.wait(timeout=1)
         status_response = client.get("/api/status")
-        duration = time.perf_counter() - start
+        release_conversion.set()
 
     assert status_response.status_code == 200
-    assert duration < 0.2
+    assert status_response.json()["queue"]["running"] == 1
 
 
 def test_startup_reconciles_stale_profiles_from_files_and_queue(tmp_path: Path):
@@ -1466,6 +1735,68 @@ def test_files_endpoint_includes_latest_artifact_and_ragflow_document(tmp_path: 
     assert file_row["artifact"]["quality_status"] == "clean"
     assert file_row["ragflow"]["document_id"] == "doc-id"
     assert file_row["ragflow"]["chunk_count"] == 10
+
+
+def test_files_endpoint_refreshes_ragflow_status_from_remote(tmp_path: Path, monkeypatch):
+    source = tmp_path / "paper.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    artifact = tmp_path / "paper.md"
+    artifact.write_text("# Paper", encoding="utf-8")
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source_id = db.upsert_source_file(
+        profile_name="quant-papers",
+        source_path=str(source),
+        source_type="paper",
+        extension="pdf",
+        sha256="abc",
+        size_bytes=3,
+        mtime=1.0,
+        state=SourceState.UPLOADED,
+    )
+    db.add_artifact(
+        source_file_id=source_id,
+        parser="glm-ocr",
+        output_path=str(artifact),
+        output_sha256="def",
+        quality_status="clean",
+        warnings_json="[]",
+    )
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-id",
+        dataset_name="quant-papers",
+        document_id="doc-id",
+        document_name="paper.md",
+        upload_status="uploaded",
+        parse_status="parsing",
+    )
+
+    class FakeRagFlowClient:
+        async def list_documents(self, dataset_id: str) -> list[dict[str, object]]:
+            assert dataset_id == "dataset-id"
+            return [
+                {
+                    "id": "doc-id",
+                    "name": "paper.md",
+                    "progress": 1.0,
+                    "run": "DONE",
+                    "chunk_count": 77,
+                    "token_count": 1234,
+                }
+            ]
+
+    monkeypatch.setattr("rag_sync.sync.RagFlowClient", FakeRagFlowClient)
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    response = client.get("/api/files")
+
+    assert response.status_code == 200
+    file_row = response.json()["files"][0]
+    assert file_row["state"] == "parsed"
+    assert file_row["ragflow"]["parse_status"] == "parsed"
+    assert file_row["ragflow"]["chunk_count"] == 77
+    assert file_row["ragflow"]["token_count"] == 1234
 
 
 def test_file_detail_endpoint_includes_recent_history(tmp_path: Path):
