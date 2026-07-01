@@ -19,7 +19,7 @@ from rag_sync.ldd import log_event
 GLM_OCR_API_URL = "https://api.z.ai/api/paas/v4/layout_parsing"
 GLM_OCR_MODEL = "glm-ocr"
 GLM_OCR_PRICE_PER_MILLION_TOKENS_USD = 0.03
-DEFAULT_ENV_FILE = Path("/home/saulius/atlas-services/rag-sync/.env")
+DEFAULT_ENV_FILE = Path(os.environ.get("RAG_SYNC_ENV_FILE", ".env"))
 DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_GLM_OCR_TIMEOUT_SECONDS", "120"))
 DEFAULT_RENDER_DPI = int(os.environ.get("RAG_SYNC_GLM_OCR_RENDER_DPI", "150"))
 DEFAULT_MAX_ATTEMPTS = int(os.environ.get("RAG_SYNC_GLM_OCR_MAX_ATTEMPTS", "3"))

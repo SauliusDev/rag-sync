@@ -1,73 +1,84 @@
+![RAG Sync space view](demo.png)
+
 # RAG Sync
 
-RAG Sync is a local ingestion control layer for syncing Atlas source files into RAGFlow.
+RAG Sync is a small local app for keeping source documents in sync with RAGFlow.
 
-It handles three things:
-- scanning Atlas source folders
-- converting files into clean Markdown artifacts
-- uploading and indexing those artifacts in RAGFlow
+It watches your folders, turns files into Markdown when needed, uploads them, and shows what is happening along the way. Nothing fancy. Just the bits I kept wanting while dealing with lots of PDFs, parser runs, queues, and RAGFlow datasets.
 
-Mental model:
+The web UI gives you the practical stuff: files, jobs, datasets, parser status, and a rough "space" view of chunks so you can see how the corpus is spread out.
 
-```text
-Atlas folders = source files and source of truth
-rag-sync = generated upload/indexing workspace and machine registry
-RAGFlow = indexed retrieval database
-```
+## What It Does
 
-The app keeps generated files under `data/`, tracks state in SQLite, and never modifies source files.
+- Scans folders from `config/profiles.toml`
+- Converts PDFs and Markdown with Marker, MinerU, GLM-OCR, or passthrough mode
+- Uploads documents to RAGFlow datasets
+- Tracks jobs and document state in SQLite
+- Shows progress in a local web UI
+- Keeps generated files under `data/`
 
-## Features
+It does not edit your source files.
 
-- profile-based source scanning
-- Marker, MinerU, and passthrough parsing
-- queue-based convert/upload/parse workflow
-- web UI for files, jobs, settings, and retrieval test wiring
-- pause and hard-stop controls for long overnight runs
+## Setup
 
-## Development
+You need Python 3.12+, `uv`, Node.js 20+, and a running RAGFlow instance.
 
 ```bash
 uv sync --dev
-uv run pytest
-uv run rag-sync --help
+npm install
+npm --prefix web install
 ```
 
-Frontend:
+Then edit `config/profiles.toml` so the source paths and dataset names match your setup.
+
+Set your RAGFlow connection:
 
 ```bash
-cd web
-npm install
-npm run build
+export RAGFLOW_BASE_URL="http://127.0.0.1:9380"
+export RAGFLOW_API_KEY="your-ragflow-api-key"
 ```
 
-## Running Locally
+Optional parser paths:
+
+```bash
+export RAG_SYNC_MARKER_BIN="/path/to/marker"
+export RAG_SYNC_MINERU_BIN="/path/to/mineru"
+```
+
+For GLM-OCR, set one of these:
+
+```bash
+export Z_AI_API_KEY="your-key"
+```
+
+## Run It
 
 Backend:
 
 ```bash
-cd /home/saulius/atlas-services/rag-sync
 uv run uvicorn rag_sync.api:app --host 0.0.0.0 --port 8091
 ```
 
 Frontend:
 
 ```bash
-cd /home/saulius/atlas-services/rag-sync/web
-npm run dev -- --host 0.0.0.0 --port 5174
+npm --prefix web run dev -- --port 5174
 ```
 
-Tailscale URLs on the Linux PC:
+CLI:
 
-```text
-Backend: http://100.87.230.80:8091/api/health
-Frontend: http://100.87.230.80:5174
+```bash
+uv run rag-sync --help
 ```
 
-The app reads the RAGFlow API key from:
+## Tests
 
-```text
-/home/saulius/atlas-services/ragflow/source/docker/.env
+```bash
+uv run pytest
+npm --prefix web test
+npm --prefix web run build
 ```
 
-It does not store API keys in SQLite.
+## License
+
+MIT

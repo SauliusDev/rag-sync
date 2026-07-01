@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Sequence
 
 from pypdf import PdfReader, PdfWriter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_ROOT = REPO_ROOT / "tools" / "parser-benchmark"
-DEFAULT_SOURCE_PDF = Path(
-    "/home/saulius/atlas/notes/quant/books/Matrix Cookbook - Kaare Brandt Petersen & Michael Syskind Pedersen.pdf"
-)
-LOCAL_MARKER_BIN = Path("/home/saulius/atlas-parser-benchmark/.venvs/marker/bin/marker")
+DEFAULT_SOURCE_PDF = Path(os.environ.get("RAG_SYNC_BENCHMARK_SOURCE_PDF", "sample.pdf"))
+LOCAL_MARKER_BIN = Path(os.environ.get("RAG_SYNC_MARKER_BIN", "marker"))
 DEFAULT_PAGE_START = 1
 DEFAULT_PAGE_COUNT = 10
 DEFAULT_TIMEOUT_SECONDS = 1200
@@ -194,7 +193,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     sample_slug = source_pdf.stem.replace(" ", "_")
     run_dir = output_root / "runs" / run_stamp
-    sample_pdf = output_root / "samples" / f"{sample_slug}-p{args.page_start}-{args.page_start + args.page_count - 1}.pdf"
+    sample_pdf = (
+        output_root
+        / "samples"
+        / f"{sample_slug}-p{args.page_start}-{args.page_start + args.page_count - 1}.pdf"
+    )
     raw_output_dir = run_dir / "marker-output"
     page_end = args.page_start + args.page_count - 1
     benchmark_started = datetime.now(UTC)

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from rag_sync.models import ParserMode, Profile, SkipRules
 
-DEFAULT_PROFILE_PATH = Path("/home/saulius/atlas-services/rag-sync/config/profiles.toml")
-DEFAULT_DATA_DIR = Path("/home/saulius/atlas-services/rag-sync/data")
-DEFAULT_RAGFLOW_ENV_FILE = Path("/home/saulius/atlas-services/ragflow/source/docker/.env")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PROFILE_PATH = Path(
+    os.environ.get("RAG_SYNC_PROFILE_PATH", REPO_ROOT / "config" / "profiles.toml")
+)
+DEFAULT_DATA_DIR = Path(os.environ.get("RAG_SYNC_DATA_DIR", REPO_ROOT / "data"))
+DEFAULT_RAGFLOW_ENV_FILE = Path(os.environ.get("RAGFLOW_ENV_FILE", REPO_ROOT / ".env"))
 DEFAULT_RAGFLOW_BASE_URL = "http://127.0.0.1:9380"
 DEFAULT_RAGFLOW_KEY_VAR = "RAGFLOW_MCP_HOST_API_KEY"
 

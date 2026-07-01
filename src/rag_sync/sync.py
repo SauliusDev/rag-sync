@@ -3,9 +3,10 @@ from __future__ import annotations
 import inspect
 import json
 import re
+from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from rag_sync.config import DEFAULT_DATA_DIR, DEFAULT_PROFILE_PATH, load_profiles
 from rag_sync.db import RagSyncDb
@@ -370,7 +371,15 @@ async def refresh_ragflow_documents(
     if not rows:
         return 0
 
-    client = client or RagFlowClient()
+    try:
+        client = client or RagFlowClient()
+    except RuntimeError as exc:
+        log_event(
+            "ragflow.refresh.skipped",
+            "warning",
+            reason=str(exc),
+        )
+        return 0
     by_dataset: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_dataset.setdefault(str(row["dataset_id"]), []).append(dict(row))

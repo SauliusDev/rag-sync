@@ -9,6 +9,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -19,8 +20,8 @@ from rag_sync.artifacts import make_upload_markdown, make_upload_markdown_from_t
 from rag_sync.glm_ocr import convert_pdf_with_glm_ocr
 from rag_sync.ldd import log_event
 
-MARKER_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/marker/bin/marker"
-MINERU_BIN = "/home/saulius/atlas-parser-benchmark/.venvs/mineru/bin/mineru"
+MARKER_BIN = os.environ.get("RAG_SYNC_MARKER_BIN", "marker")
+MINERU_BIN = os.environ.get("RAG_SYNC_MINERU_BIN", "mineru")
 MARKER_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "1200"))
 MINERU_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MINERU_TIMEOUT_SECONDS", "1200"))
 MARKER_LOW_MEMORY_OCR = (
@@ -206,11 +207,9 @@ def _run_parser_command(
     try:
         try:
             stdout, stderr = proc.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            try:
+        except subprocess.TimeoutExpired as exc:
+            with suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
             log_event(
                 "parser.command.timeout",
                 "error",
@@ -220,7 +219,7 @@ def _run_parser_command(
                 timeout_seconds=timeout_seconds,
                 duration_seconds=time.monotonic() - started,
             )
-            raise RuntimeError(f"{parser_name} timed out after {timeout_seconds}s")
+            raise RuntimeError(f"{parser_name} timed out after {timeout_seconds}s") from exc
     finally:
         _unregister_parser_process(proc)
     log_event(

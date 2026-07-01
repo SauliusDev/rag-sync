@@ -18,7 +18,7 @@ def test_load_profiles_reads_quant_defaults(tmp_path: Path):
         """
 [[profiles]]
 name = "quant-books"
-source_paths = ["/home/saulius/atlas/notes/quant/books"]
+source_paths = ["./examples/books"]
 file_types = ["pdf"]
 parser_mode = "marker"
 target_dataset = "quant-books"
@@ -35,7 +35,7 @@ suffixes = []
 
     assert len(profiles) == 1
     assert profiles[0].name == "quant-books"
-    assert profiles[0].source_paths == (Path("/home/saulius/atlas/notes/quant/books"),)
+    assert profiles[0].source_paths == (Path("./examples/books"),)
     assert profiles[0].file_types == ("pdf",)
     assert profiles[0].parser_mode == ParserMode.MARKER
     assert profiles[0].source_type == "book"
@@ -71,7 +71,7 @@ def test_load_profiles_reads_committed_config():
     quant_papers = next(profile for profile in profiles if profile.name == "quant-papers")
     assert quant_papers.parser_mode == ParserMode.GLM_OCR
     quant_videos = next(profile for profile in profiles if profile.name == "quant-videos")
-    assert quant_videos.source_paths == (Path("/home/saulius/atlas/notes/quant/videos"),)
+    assert quant_videos.source_paths == (Path("./examples/videos"),)
     assert quant_videos.file_types == ("md",)
     assert quant_videos.parser_mode == ParserMode.PASSTHROUGH
     assert quant_videos.skip_rules.path_parts == ("_meta",)

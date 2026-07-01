@@ -1,5 +1,6 @@
 {
   "name": "rag-sync",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "bash scripts/dev.sh",

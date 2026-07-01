@@ -134,7 +134,7 @@ def test_stage_marker_input_copies_sample_into_input_directory(tmp_path: Path) -
 
 
 def test_default_marker_bin_prefers_local_benchmark_venv(monkeypatch: pytest.MonkeyPatch) -> None:
-    expected = Path("/home/saulius/atlas-parser-benchmark/.venvs/marker/bin/marker")
+    expected = Path("/opt/marker/bin/marker")
     monkeypatch.setattr(benchmark_marker, "LOCAL_MARKER_BIN", expected)
     monkeypatch.setattr(benchmark_marker.shutil, "which", lambda name: None)
 

@@ -1,6 +1,6 @@
 [[profiles]]
 name = "quant-books"
-source_paths = ["/home/saulius/atlas/notes/quant/books"]
+source_paths = ["./examples/books"]
 file_types = ["pdf"]
 parser_mode = "glm-ocr"
 target_dataset = "quant-books"
@@ -16,7 +16,7 @@ suffixes = []
 
 [[profiles]]
 name = "quant-papers"
-source_paths = ["/home/saulius/atlas/notes/quant/papers"]
+source_paths = ["./examples/papers"]
 file_types = ["pdf", "md"]
 parser_mode = "glm-ocr"
 target_dataset = "quant-papers"
@@ -32,7 +32,7 @@ suffixes = []
 
 [[profiles]]
 name = "quant-articles"
-source_paths = ["/home/saulius/atlas/notes/quant/articles"]
+source_paths = ["./examples/articles"]
 file_types = ["md"]
 parser_mode = "passthrough"
 target_dataset = "quant-articles"
@@ -48,7 +48,7 @@ suffixes = [".excalidraw.md"]
 
 [[profiles]]
 name = "quant-videos"
-source_paths = ["/home/saulius/atlas/notes/quant/videos"]
+source_paths = ["./examples/videos"]
 file_types = ["md"]
 parser_mode = "passthrough"
 target_dataset = "quant-videos"
