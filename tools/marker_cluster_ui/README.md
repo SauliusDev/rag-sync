@@ -1,6 +1,6 @@
 # Marker Cluster UI
 
-Standalone terminal runner for cluster-side Marker batch conversion. It wraps `rag_sync.marker_batch.run_batch(...)` and prints a compact Rich summary with the batch id, counts, manifest path, and log path.
+Standalone terminal runner for cluster-side Marker batch conversion. It wraps `src.marker_batch.run_batch(...)` and prints a compact Rich summary with the batch id, counts, manifest path, and log path.
 
 ## Prerequisites
 

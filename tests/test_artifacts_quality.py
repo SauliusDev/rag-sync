@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from rag_sync.artifacts import make_upload_markdown
-from rag_sync.quality import check_markdown_quality
+from src.artifacts import make_upload_markdown
+from src.quality import check_markdown_quality
 
 
 def test_make_upload_markdown_preserves_body(project_tmp: Path):

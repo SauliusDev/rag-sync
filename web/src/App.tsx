@@ -3,22 +3,25 @@ import {
   fetchDatasets,
   fetchProfiles,
   fetchSettings,
+  fetchSpace,
   type AppSettings,
   type DatasetSummary,
   type Profile,
+  type SpaceResponse,
 } from './api';
 import { JobsScreen } from './components/JobsScreen';
 import { formatCostUsd } from './components/JobsPanel';
 import { StatusBadge } from './components/StatusBadge';
 import { FilesScreen } from './components/FilesScreen';
 import { DatasetsScreen } from './components/DatasetsScreen';
+import { SpaceScreen } from './components/SpaceScreen';
 import { DataTableShell } from './components/ui/DataTableShell';
 import { ScreenHeader } from './components/ui/ScreenHeader';
 import { SectionBlock } from './components/ui/SectionBlock';
 import { loadJson, saveJson } from './storage';
 import { ThemeButton } from './theme';
 
-const tabs = ['Files', 'Jobs', 'Datasets', 'Settings'] as const;
+const tabs = ['Files', 'Jobs', 'Datasets', 'Space', 'Settings'] as const;
 type Tab = (typeof tabs)[number];
 
 function initialTab(): Tab {
@@ -40,6 +43,9 @@ export function App() {
   const [datasetsLoading, setDatasetsLoading] = useState(true);
   const [datasetsError, setDatasetsError] = useState('');
   const [datasetsRemoteError, setDatasetsRemoteError] = useState('');
+  const [space, setSpace] = useState<SpaceResponse | null>(null);
+  const [spaceLoading, setSpaceLoading] = useState(true);
+  const [spaceError, setSpaceError] = useState('');
 
   function selectTab(tab: Tab) {
     setActive(tab);
@@ -82,6 +88,17 @@ export function App() {
         setDatasetsError(error instanceof Error ? error.message : 'Failed to fetch datasets');
       })
       .finally(() => setDatasetsLoading(false));
+
+    setSpaceLoading(true);
+    fetchSpace()
+      .then((payload) => {
+        setSpace(payload);
+        setSpaceError('');
+      })
+      .catch((error: unknown) => {
+        setSpaceError(error instanceof Error ? error.message : 'Failed to fetch chunk space');
+      })
+      .finally(() => setSpaceLoading(false));
   }, []);
 
   return (
@@ -130,6 +147,9 @@ export function App() {
               error={datasetsError}
               remoteError={datasetsRemoteError}
             />
+          </section>
+          <section className="screen-panel" hidden={active !== 'Space'} aria-hidden={active !== 'Space'}>
+            <SpaceScreen space={space} loading={spaceLoading} error={spaceError} />
           </section>
           <section className="screen-panel" hidden={active !== 'Settings'} aria-hidden={active !== 'Settings'}>
             <>

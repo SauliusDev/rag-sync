@@ -13,8 +13,8 @@ from typing import Any
 import fitz
 import httpx
 
-from rag_sync.artifacts import make_upload_markdown_from_text
-from rag_sync.ldd import log_event
+from src.artifacts import make_upload_markdown_from_text
+from src.ldd import log_event
 
 GLM_OCR_API_URL = "https://api.z.ai/api/paas/v4/layout_parsing"
 GLM_OCR_MODEL = "glm-ocr"

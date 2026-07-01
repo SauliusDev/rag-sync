@@ -19,14 +19,14 @@ dependencies = [
 ]
 
 [project.scripts]
-rag-sync = "rag_sync.cli:app"
+rag-sync = "src.cli:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rag_sync"]
+packages = ["src"]
 
 [dependency-groups]
 dev = [
@@ -38,7 +38,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "."]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

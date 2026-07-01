@@ -190,6 +190,58 @@ export type DatasetOverviewResponse = {
   remote_error: string | null;
 };
 
+export type SpaceDataset = {
+  id: string;
+  name: string;
+  chunk_count: number;
+};
+
+export type SpaceDocument = {
+  id: string;
+  dataset_id: string;
+  dataset_name: string;
+  name: string;
+  source_path: string;
+  chunk_count: number;
+};
+
+export type SpaceChunk = {
+  id: string;
+  document_id: string;
+  dataset_id: string;
+  dataset_name: string;
+  document_name: string;
+  source_path?: string;
+  content_preview: string;
+  keywords: string[];
+  position: {
+    x: number;
+    y: number;
+    z: number;
+  };
+};
+
+export type SpaceResponse = {
+  summary: {
+    datasets: number;
+    documents: number;
+    chunks: number;
+  };
+  datasets: SpaceDataset[];
+  documents: SpaceDocument[];
+  chunks: SpaceChunk[];
+  errors: Array<{
+    document_id: string;
+    document_name: string;
+    message: string;
+  }>;
+  cache?: {
+    status: 'hit' | 'miss' | 'stored';
+    fingerprint: string;
+    updated_at: string;
+  };
+};
+
 export type AppSettings = {
   profile_path: string;
   ragflow_base_url: string;
@@ -465,6 +517,14 @@ export async function fetchDatasets(): Promise<DatasetOverviewResponse> {
     throw new Error(`Failed to fetch datasets: ${response.status}`);
   }
   return (await response.json()) as DatasetOverviewResponse;
+}
+
+export async function fetchSpace(): Promise<SpaceResponse> {
+  const response = await fetch('/api/space', noStore);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch space: ${response.status}`);
+  }
+  return (await response.json()) as SpaceResponse;
 }
 
 export async function previewImportBatch(

@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from rag_sync import ldd
-from rag_sync.db import RagSyncDb
-from rag_sync.models import ParserMode, Profile, SourceState
-from rag_sync.parsers import ParserResult
-from rag_sync.scanner import sha256_file
-from rag_sync.sync import (
+from src import ldd
+from src.db import RagSyncDb
+from src.models import ParserMode, Profile, SourceState
+from src.parsers import ParserResult
+from src.scanner import sha256_file
+from src.sync import (
     DEFAULT_DATA_DIR,
     convert_source_file,
     delete_ragflow_document,
@@ -128,7 +128,7 @@ def test_convert_source_file_passthrough_records_artifact_and_converted_state(
     db.migrate()
     source_id = _add_source(db, source_file)
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [_profile(source_dir)])
+    monkeypatch.setattr("src.sync.load_profiles", lambda _path: [_profile(source_dir)])
 
     output_path = convert_source_file(db, source_id)
 
@@ -159,7 +159,7 @@ def test_convert_source_file_records_blocked_artifact_then_raises(
     db.migrate()
     source_id = _add_source(db, source_file)
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [_profile(source_dir)])
+    monkeypatch.setattr("src.sync.load_profiles", lambda _path: [_profile(source_dir)])
 
     with pytest.raises(RuntimeError, match="quality check blocked"):
         convert_source_file(db, source_id)
@@ -192,7 +192,7 @@ def test_convert_source_file_falls_back_to_mineru_for_pdf_books(
         source_type="book",
     )
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+    monkeypatch.setattr("src.sync.load_profiles", lambda _path: [profile])
 
     class FailingMarker:
         def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
@@ -211,7 +211,7 @@ def test_convert_source_file_falls_back_to_mineru_for_pdf_books(
             return WorkingMineru()
         raise AssertionError(f"unexpected parser {parser_name}")
 
-    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+    monkeypatch.setattr("src.sync._parser_for_name", fake_parser_for_name)
 
     output_path = convert_source_file(db, source_id)
 
@@ -251,7 +251,7 @@ def test_convert_source_file_uses_glm_ocr_profile_default(
         source_type="book",
     )
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+    monkeypatch.setattr("src.sync.load_profiles", lambda _path: [profile])
 
     class WorkingGlmOcr:
         def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
@@ -259,7 +259,7 @@ def test_convert_source_file_uses_glm_ocr_profile_default(
             output_path.write_text("# glm body\n\n$x + y$\n", encoding="utf-8")
             return ParserResult("glm-ocr", output_path, "", "")
 
-    monkeypatch.setattr("rag_sync.sync._parser_for_name", lambda parser_name: WorkingGlmOcr())
+    monkeypatch.setattr("src.sync._parser_for_name", lambda parser_name: WorkingGlmOcr())
 
     output_path = convert_source_file(db, source_id)
 
@@ -292,7 +292,7 @@ def test_convert_source_file_falls_back_when_marker_output_is_empty(
         source_type="book",
     )
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+    monkeypatch.setattr("src.sync.load_profiles", lambda _path: [profile])
 
     class EmptyMarker:
         def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
@@ -313,7 +313,7 @@ def test_convert_source_file_falls_back_when_marker_output_is_empty(
             return WorkingMineru()
         raise AssertionError(f"unexpected parser {parser_name}")
 
-    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+    monkeypatch.setattr("src.sync._parser_for_name", fake_parser_for_name)
 
     output_path = convert_source_file(db, source_id)
 
@@ -356,7 +356,7 @@ def test_convert_source_file_logs_marker_fallback_to_mineru(
         source_type="book",
     )
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+    monkeypatch.setattr("src.sync.load_profiles", lambda _path: [profile])
 
     class FailingMarker:
         def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
@@ -375,7 +375,7 @@ def test_convert_source_file_logs_marker_fallback_to_mineru(
             return WorkingMineru()
         raise AssertionError(f"unexpected parser {parser_name}")
 
-    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+    monkeypatch.setattr("src.sync._parser_for_name", fake_parser_for_name)
 
     try:
         convert_source_file(db, source_id)
@@ -416,7 +416,7 @@ def test_convert_source_file_does_not_fallback_when_parser_explicit(
         source_type="book",
     )
     monkeypatch.chdir(project_tmp)
-    monkeypatch.setattr("rag_sync.sync.load_profiles", lambda _path: [profile])
+    monkeypatch.setattr("src.sync.load_profiles", lambda _path: [profile])
 
     class FailingMarker:
         def convert(self, source_path: Path, output_path: Path, source_type: str, sha256: str):
@@ -427,7 +427,7 @@ def test_convert_source_file_does_not_fallback_when_parser_explicit(
             return FailingMarker()
         raise AssertionError(f"unexpected parser {parser_name}")
 
-    monkeypatch.setattr("rag_sync.sync._parser_for_name", fake_parser_for_name)
+    monkeypatch.setattr("src.sync._parser_for_name", fake_parser_for_name)
 
     with pytest.raises(RuntimeError, match="marker failed"):
         convert_source_file(db, source_id, parser_name="marker")
@@ -509,7 +509,7 @@ def test_upload_latest_artifact_records_ragflow_document(
 ):
     db, source_id, output_path = _converted_source_with_artifact(project_tmp)
     monkeypatch.setattr(
-        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
+        "src.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
     )
     client = FakeRagFlowClient()
 
@@ -545,7 +545,7 @@ def test_upload_latest_artifact_rejects_blocked_artifact(
         warnings_json='["generated markdown is empty"]',
     )
     monkeypatch.setattr(
-        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
+        "src.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
     )
     client = FakeRagFlowClient()
 
@@ -583,7 +583,7 @@ def test_upload_latest_artifact_validates_missing_ids(
 ):
     db, source_id, _ = _converted_source_with_artifact(project_tmp)
     monkeypatch.setattr(
-        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
+        "src.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
     )
 
     with pytest.raises(RuntimeError, match=message):
@@ -685,7 +685,7 @@ def test_restart_ragflow_document_reuses_latest_artifact(
         parse_status="parsed",
     )
     monkeypatch.setattr(
-        "rag_sync.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
+        "src.sync.load_profiles", lambda _path: [_profile(project_tmp / "articles")]
     )
     client = FakeRagFlowClient(uploaded={"id": "new-doc", "name": "Output.md"})
 

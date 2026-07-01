@@ -77,7 +77,7 @@ describe('jobs panel helpers', () => {
 
     const markup = renderToStaticMarkup(createElement(App));
 
-    expect(markup.match(/<h1/g)?.length).toBe(4);
+    expect(markup.match(/<h1/g)?.length).toBe(5);
     expect(markup).toContain('<section class="screen-panel" hidden="" aria-hidden="true"><div class="files-screen">');
     expect(markup).toContain('<section class="screen-panel" aria-hidden="false"><div class="jobs-screen">');
     expect(markup).toContain('id="jobs-screen-title"');
@@ -92,7 +92,7 @@ describe('jobs panel helpers', () => {
 
     const markup = renderToStaticMarkup(createElement(App));
 
-    expect(markup.match(/<h1/g)?.length).toBe(4);
+    expect(markup.match(/<h1/g)?.length).toBe(5);
     expect(markup).toContain('<section class="screen-panel" aria-hidden="false"><div class="files-screen">');
     expect(markup).toContain('Files</h1>');
   });

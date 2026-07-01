@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
-from rag_sync.parser_experiments import (
+from src.parser_experiments import (
     default_variant_specs,
     parser_env_summary,
     run_variant,

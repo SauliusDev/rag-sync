@@ -56,7 +56,7 @@ export Z_AI_API_KEY="your-key"
 Backend:
 
 ```bash
-uv run uvicorn rag_sync.api:app --host 0.0.0.0 --port 8091
+uv run uvicorn src.api:app --host 0.0.0.0 --port 8091
 ```
 
 Frontend:

@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from rag_sync.models import DiscoveredFile, Profile, SourceState
+from src.models import DiscoveredFile, Profile, SourceState
 
 
 @dataclass(frozen=True)

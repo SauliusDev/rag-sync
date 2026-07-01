@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from rag_sync.db import RagSyncDb
-from rag_sync.import_manifest import import_manifest_batch, load_manifest
-from rag_sync.models import SourceState
+from src.db import RagSyncDb
+from src.import_manifest import import_manifest_batch, load_manifest
+from src.models import SourceState
 
 
 def test_manifest_parser_rejects_missing_required_fields(tmp_path: Path):

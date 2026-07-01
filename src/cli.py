@@ -9,17 +9,17 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
-from rag_sync.marker_batch import run_batch as run_marker_batch
-from rag_sync.models import Profile
-from rag_sync.sync import (
+from src.config import DEFAULT_PROFILE_PATH, load_profiles
+from src.marker_batch import run_batch as run_marker_batch
+from src.models import Profile
+from src.sync import (
     convert_source_file,
     default_db,
     parse_uploaded_document,
     persist_scan,
     upload_latest_artifact,
 )
-from rag_sync.visual_audit import (
+from src.visual_audit import (
     append_significant_finding_to_mind,
     audit_manifest,
     auditor_from_env,

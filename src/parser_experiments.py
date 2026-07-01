@@ -8,15 +8,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from rag_sync.ldd import log_event
-from rag_sync.parsers import (
+from src.ldd import log_event
+from src.parsers import (
     convert_with_marker,
     convert_with_mineru,
     mineru_available,
 )
-from rag_sync.quality import check_markdown_quality
-from rag_sync.scanner import pdf_metadata, sha256_file
-from rag_sync.visual_audit import prepare_book_audit_bundle, write_prepared_book_bundle
+from src.quality import check_markdown_quality
+from src.scanner import pdf_metadata, sha256_file
+from src.visual_audit import prepare_book_audit_bundle, write_prepared_book_bundle
 
 CandidateState = Literal["pending", "ok", "failed", "skipped"]
 

@@ -13,8 +13,8 @@ from typing import Any, Literal
 import httpx
 from pypdf import PdfReader
 
-from rag_sync.ldd import log_event
-from rag_sync.scanner import sha256_file
+from src.ldd import log_event
+from src.scanner import sha256_file
 
 AuditVerdict = Literal["accept", "review", "reject"]
 

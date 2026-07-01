@@ -3,9 +3,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from rag_sync.db import RagSyncDb
-from rag_sync.ldd import log_event
-from rag_sync.models import JobKind
+from src.db import RagSyncDb
+from src.ldd import log_event
+from src.models import JobKind
 
 JobHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
 

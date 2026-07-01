@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from rag_sync.config import (
+from src.config import (
     DEFAULT_RAGFLOW_BASE_URL,
     DEFAULT_RAGFLOW_ENV_FILE,
     DEFAULT_RAGFLOW_KEY_VAR,
@@ -86,6 +86,8 @@ QUANT_DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 def read_env_value(path: Path, key: str) -> str:
+    if not path.exists():
+        raise RuntimeError(f"{key} not found in {path}")
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
@@ -94,6 +96,16 @@ def read_env_value(path: Path, key: str) -> str:
         if k.strip() == key:
             return value.strip().strip('"').strip("'")
     raise RuntimeError(f"{key} not found in {path}")
+
+
+def _read_first_env_value(path: Path, keys: tuple[str, ...]) -> str:
+    errors: list[str] = []
+    for key in keys:
+        try:
+            return read_env_value(path, key)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+    raise RuntimeError("; ".join(errors))
 
 
 def redact_secret(text: str, secret: str) -> str:
@@ -115,7 +127,7 @@ class RagFlowClient:
         self.api_key = (
             api_key
             or os.environ.get("RAGFLOW_API_KEY")
-            or read_env_value(env_file, key_var)
+            or _read_first_env_value(env_file, ("RAGFLOW_API_KEY", key_var))
         )
         self._transport = transport
 
@@ -229,6 +241,21 @@ class RagFlowClient:
             if isinstance(data, list):
                 return data
             raise RuntimeError("RAGFlow response missing documents list")
+
+    async def list_chunks(self, dataset_id: str, document_id: str) -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks",
+                params={"page": 1, "page_size": 100},
+                headers=self.headers,
+            )
+            payload = self._response_json(resp)
+            data = payload.get("data")
+            if isinstance(data, dict) and isinstance(data.get("chunks"), list):
+                return data["chunks"]
+            if isinstance(data, list):
+                return data
+            raise RuntimeError("RAGFlow response missing chunks list")
 
     async def parse_documents(self, dataset_id: str, document_ids: list[str]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=120, transport=self._transport) as client:

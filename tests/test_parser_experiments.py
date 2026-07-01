@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rag_sync.parser_experiments import (
+from src.parser_experiments import (
     default_variant_specs,
     parser_env_summary,
     score_from_audit_json,

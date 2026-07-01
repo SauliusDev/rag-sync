@@ -5,12 +5,12 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import rag_sync.api
-import rag_sync.queue
-from rag_sync import ldd
-from rag_sync.api import create_app, infer_job_stage
-from rag_sync.db import RagSyncDb
-from rag_sync.models import SourceState
+import src.api
+import src.queue
+from src import ldd
+from src.api import create_app, infer_job_stage
+from src.db import RagSyncDb
+from src.models import SourceState
 
 
 def make_import_batch_dir(tmp_path: Path, *, source_relpath: str, source_sha256: str) -> Path:
@@ -65,6 +65,106 @@ def test_health_endpoint():
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_space_endpoint_returns_projected_ragflow_chunks(tmp_path: Path, monkeypatch):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "volatility.md"
+    source.write_text("# Volatility\n", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-articles",
+        source_path=str(source),
+        source_type="article",
+        extension="md",
+        sha256="abc",
+        size_bytes=12,
+        mtime=1.0,
+        state=SourceState.UPLOADED,
+    )
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-1",
+        dataset_name="quant-articles",
+        document_id="doc-1",
+        document_name="volatility.md",
+        upload_status="uploaded",
+        parse_status="parsed",
+        chunk_count=1,
+        token_count=10,
+    )
+
+    class FakeRagFlowClient:
+        async def list_chunks(self, dataset_id: str, document_id: str):
+            assert dataset_id == "dataset-1"
+            assert document_id == "doc-1"
+            return [{"id": "chunk-1", "content": "Volatility smiles and term structure"}]
+
+    monkeypatch.setattr(src.api, "RagFlowClient", FakeRagFlowClient)
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    response = client.get("/api/space")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cache"]["hit"] is False
+    assert payload["summary"] == {"datasets": 1, "documents": 1, "chunks": 1}
+    assert payload["datasets"][0]["name"] == "quant-articles"
+    assert payload["datasets"][0]["chunk_count"] == 1
+    assert payload["documents"][0]["id"] == "doc-1"
+    assert payload["documents"][0]["dataset_name"] == "quant-articles"
+    assert payload["documents"][0]["source_path"] == str(source)
+    assert payload["chunks"][0]["id"] == "chunk-1"
+    assert payload["chunks"][0]["document_id"] == "doc-1"
+    assert payload["chunks"][0]["dataset_name"] == "quant-articles"
+    assert payload["chunks"][0]["document_name"] == "volatility.md"
+    assert payload["chunks"][0]["source_path"] == str(source)
+    assert payload["chunks"][0]["content_preview"] == "Volatility smiles and term structure"
+    assert payload["chunks"][0]["keywords"] == []
+    assert set(payload["chunks"][0]["position"]) == {"x", "y", "z"}
+
+
+def test_space_endpoint_reports_missing_ragflow_key_once(tmp_path: Path, monkeypatch):
+    db = RagSyncDb(tmp_path / "state.sqlite")
+    db.migrate()
+    source = tmp_path / "volatility.md"
+    source.write_text("# Volatility\n", encoding="utf-8")
+    source_id = db.upsert_source_file(
+        profile_name="quant-articles",
+        source_path=str(source),
+        source_type="article",
+        extension="md",
+        sha256="abc",
+        size_bytes=12,
+        mtime=1.0,
+        state=SourceState.UPLOADED,
+    )
+    db.upsert_ragflow_document(
+        source_file_id=source_id,
+        dataset_id="dataset-1",
+        dataset_name="quant-articles",
+        document_id="doc-1",
+        document_name="volatility.md",
+        upload_status="uploaded",
+        parse_status="parsed",
+        chunk_count=1,
+        token_count=10,
+    )
+
+    class MissingKeyClient:
+        def __init__(self):
+            raise RuntimeError("RAGFLOW_API_KEY not found")
+
+    monkeypatch.setattr(src.api, "RagFlowClient", MissingKeyClient)
+    client = TestClient(create_app(db_factory=lambda: db))
+
+    response = client.get("/api/space")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["errors"]) == 1
+    assert payload["errors"][0]["message"] == "RuntimeError: RAGFLOW_API_KEY not found"
+    assert payload["summary"] == {"datasets": 0, "documents": 1, "chunks": 0}
 
 
 def test_profiles_endpoint_serializes_profile_config(tmp_path: Path):
@@ -154,7 +254,7 @@ source_type = "book"
     db = RagSyncDb(tmp_path / "state.sqlite")
     db.migrate()
     monkeypatch.setattr(
-        rag_sync.api,
+        src.api,
         "openrouter_account_usage",
         lambda: {
             "tracked": False,
@@ -202,7 +302,7 @@ source_type = "book"
     db.migrate()
 
     monkeypatch.setattr(
-        rag_sync.api,
+        src.api,
         "openrouter_account_usage",
         lambda: {
             "tracked": True,
@@ -363,7 +463,7 @@ source_type = "paper"
                 },
             ]
 
-    monkeypatch.setattr(rag_sync.api, "RagFlowClient", FakeRagFlowClient)
+    monkeypatch.setattr(src.api, "RagFlowClient", FakeRagFlowClient)
     client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
 
     response = client.get("/api/datasets")
@@ -628,7 +728,7 @@ def test_convert_file_endpoint_runs_conversion_with_injected_db(
         calls.append((actual_db, source_file_id, parser_name, profile_path))
         return tmp_path / "output.md"
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
     client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
 
     response = client.post("/api/files/42/convert", json={"parser": "marker"})
@@ -652,7 +752,7 @@ def test_upload_file_endpoint_returns_ragflow_document(
         calls.append((actual_db, source_file_id, profile_path))
         return {"dataset_id": "dataset", "document_id": "doc", "document_name": "out.md"}
 
-    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(src.api, "upload_latest_artifact", fake_upload)
     client = TestClient(create_app(profile_path=config, db_factory=lambda: db))
 
     response = client.post("/api/files/42/upload")
@@ -678,7 +778,7 @@ def test_parse_file_endpoint_returns_parse_response(
         calls.append((actual_db, source_file_id))
         return {"code": 0, "message": "ok"}
 
-    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+    monkeypatch.setattr(src.api, "parse_uploaded_document", fake_parse)
     client = TestClient(create_app(db_factory=lambda: db))
 
     response = client.post("/api/files/42/parse")
@@ -715,7 +815,7 @@ def test_status_endpoint_returns_queue_counts(tmp_path: Path, monkeypatch):
     running_id = db.create_job("parse", source_file_id=None, profile_name="quant-books")
     db.update_job_status(running_id, "running", progress=0.4)
     monkeypatch.setattr(
-        rag_sync.api,
+        src.api,
         "openrouter_account_usage",
         lambda: {
             "tracked": False,
@@ -803,9 +903,9 @@ source_type = "book"
         calls.append(("parse", source_file_id))
         return {"code": 0}
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
-    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
-    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(src.api, "parse_uploaded_document", fake_parse)
 
     with TestClient(
         create_app(
@@ -875,9 +975,9 @@ source_type = "book"
     async def fake_parse(actual_db, source_file_id, client=None):
         return {"code": 0}
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
-    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
-    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(src.api, "parse_uploaded_document", fake_parse)
 
     with TestClient(
         create_app(
@@ -960,9 +1060,9 @@ source_type = "book"
     async def fake_parse(actual_db, source_file_id, client=None):
         return {"code": 0}
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
-    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
-    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(src.api, "parse_uploaded_document", fake_parse)
 
     with TestClient(
         create_app(
@@ -1039,9 +1139,9 @@ source_type = "book"
     async def fake_parse(actual_db, source_file_id, client=None):
         return {"code": 0}
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
-    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
-    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(src.api, "parse_uploaded_document", fake_parse)
 
     with TestClient(
         create_app(
@@ -1110,7 +1210,7 @@ source_type = "book"
     def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
         return tmp_path / "book.md"
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
 
     with TestClient(
         create_app(
@@ -1187,7 +1287,7 @@ source_type = "book"
     def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
         return tmp_path / "book.md"
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
 
     with TestClient(
         create_app(
@@ -1267,8 +1367,8 @@ source_type = "book"
             time.sleep(0.01)
         raise RuntimeError("expected cancel request")
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
-    monkeypatch.setattr(rag_sync.api, "terminate_active_parser_processes", lambda: 1)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "terminate_active_parser_processes", lambda: 1)
 
     with TestClient(
         create_app(
@@ -1340,7 +1440,7 @@ source_type = "book"
     def fake_convert(actual_db, source_file_id, parser_name=None, profile_path=config):
         return tmp_path / "book.md"
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
 
     with TestClient(
         create_app(
@@ -1422,9 +1522,9 @@ source_type = "book"
     async def fake_parse(actual_db, source_file_id, client=None):
         return {"code": 0}
 
-    monkeypatch.setattr(rag_sync.api, "convert_source_file", fake_convert)
-    monkeypatch.setattr(rag_sync.api, "upload_latest_artifact", fake_upload)
-    monkeypatch.setattr(rag_sync.api, "parse_uploaded_document", fake_parse)
+    monkeypatch.setattr(src.api, "convert_source_file", fake_convert)
+    monkeypatch.setattr(src.api, "upload_latest_artifact", fake_upload)
+    monkeypatch.setattr(src.api, "parse_uploaded_document", fake_parse)
 
     with TestClient(
         create_app(
@@ -1786,7 +1886,7 @@ def test_files_endpoint_refreshes_ragflow_status_from_remote(tmp_path: Path, mon
                 }
             ]
 
-    monkeypatch.setattr("rag_sync.sync.RagFlowClient", FakeRagFlowClient)
+    monkeypatch.setattr("src.sync.RagFlowClient", FakeRagFlowClient)
     client = TestClient(create_app(db_factory=lambda: db))
 
     response = client.get("/api/files")
@@ -1928,12 +2028,12 @@ def test_jobs_endpoint_includes_eta_wait_confidence_and_timing_basis(
 
     timing_context_sentinel = timing_context
     monkeypatch.setattr(
-        rag_sync.api,
+        src.api,
         "prepare_timing_context",
         fake_prepare_timing_context,
         raising=False,
     )
-    monkeypatch.setattr(rag_sync.api, "estimate_job_timing", fake_estimate_job_timing, raising=False)
+    monkeypatch.setattr(src.api, "estimate_job_timing", fake_estimate_job_timing, raising=False)
 
     with TestClient(create_app(db_factory=lambda: db, worker_enabled=False)) as client:
         client.app.state.queue.current_job_id = active_job_id
@@ -2022,7 +2122,7 @@ def test_status_endpoint_includes_active_stage_and_system_metrics(tmp_path: Path
     db.update_job_status(job_id, "running", progress=0.35)
     db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
 
-    monkeypatch.setattr(rag_sync.api, "read_system_metrics", lambda: {
+    monkeypatch.setattr(src.api, "read_system_metrics", lambda: {
         "cpu": {"label": "CPU 62%", "value": 62},
         "memory": {"label": "RAM 41%", "value": 41},
         "gpu": {"label": "GPU 97%", "value": 97},
@@ -2158,21 +2258,21 @@ def test_status_endpoint_returns_queue_eta_payload(tmp_path: Path, monkeypatch):
         }
 
     timing_context_sentinel = timing_context
-    monkeypatch.setattr(rag_sync.api, "read_system_metrics", lambda: {})
+    monkeypatch.setattr(src.api, "read_system_metrics", lambda: {})
     monkeypatch.setattr(
-        rag_sync.api,
+        src.api,
         "prepare_timing_context",
         fake_prepare_timing_context,
         raising=False,
     )
     monkeypatch.setattr(
-        rag_sync.api,
+        src.api,
         "estimate_job_timing",
         fake_estimate_job_timing,
         raising=False,
     )
     monkeypatch.setattr(
-        rag_sync.api,
+        src.api,
         "estimate_queue_timing",
         fake_estimate_queue_timing,
         raising=False,
@@ -2236,7 +2336,7 @@ def test_status_endpoint_finds_running_job_beyond_default_page_limit(
     for _ in range(110):
         db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
 
-    monkeypatch.setattr(rag_sync.api, "read_system_metrics", lambda: {})
+    monkeypatch.setattr(src.api, "read_system_metrics", lambda: {})
     client = TestClient(create_app(db_factory=lambda: db))
 
     response = client.get("/api/status")
@@ -2265,7 +2365,7 @@ def test_status_endpoint_falls_back_to_runtime_active_job_when_db_has_none(
     )
     job_id = db.create_job("sync_file", source_file_id=source_id, profile_name="quant-books")
 
-    monkeypatch.setattr(rag_sync.api, "read_system_metrics", lambda: {})
+    monkeypatch.setattr(src.api, "read_system_metrics", lambda: {})
     with TestClient(create_app(db_factory=lambda: db, worker_enabled=False)) as client:
         client.app.state.queue.current_job_id = job_id
         client.app.state.queue.current_job = {
@@ -2394,7 +2494,7 @@ def test_worker_loop_recovers_when_run_next_raises(tmp_path: Path, monkeypatch):
             return True
         return False
 
-    monkeypatch.setattr(rag_sync.queue.PersistentJobQueue, "run_next", flaky_run_next)
+    monkeypatch.setattr(src.queue.PersistentJobQueue, "run_next", flaky_run_next)
 
     with TestClient(create_app(db_factory=lambda: db, worker_poll_interval=0.01)):
         deadline = time.monotonic() + 0.5
@@ -2450,7 +2550,7 @@ def test_queue_resume_restarts_worker_when_task_has_stopped(tmp_path: Path, monk
             self.db.update_job_status(int(queued["id"]), "completed", progress=1)
             return True
 
-        monkeypatch.setattr(rag_sync.queue.PersistentJobQueue, "run_next", finish_job_once)
+        monkeypatch.setattr(src.queue.PersistentJobQueue, "run_next", finish_job_once)
 
         response = client.post("/api/queue/resume")
 
@@ -2492,7 +2592,7 @@ def test_queue_kill_endpoint_pauses_queue_and_requests_cancel(tmp_path: Path, mo
         profile_name="quant-books",
     )
     db.update_job_status(running_job_id, "running", progress=0.1)
-    monkeypatch.setattr(rag_sync.api, "terminate_active_parser_processes", lambda: 1)
+    monkeypatch.setattr(src.api, "terminate_active_parser_processes", lambda: 1)
     log_path = tmp_path / "rag-sync.log"
     ldd.set_log_path_for_tests(log_path)
     try:

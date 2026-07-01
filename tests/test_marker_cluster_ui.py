@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from rag_sync.marker_batch import BatchRunResult
+from src.marker_batch import BatchRunResult
 from tools.marker_cluster_ui.run import main, parse_args
 
 

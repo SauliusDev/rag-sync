@@ -60,7 +60,7 @@ def test_build_summary_contains_duration_and_markdown_size(tmp_path: Path) -> No
     assert summary["markdown_bytes"] == 7
 
 
-def test_build_marker_command_matches_rag_sync_flags(tmp_path: Path) -> None:
+def test_build_marker_command_matches_src_flags(tmp_path: Path) -> None:
     command = benchmark_marker.build_marker_command(
         marker_bin="/tmp/marker",
         input_dir=tmp_path / ".input",

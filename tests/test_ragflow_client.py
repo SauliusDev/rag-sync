@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from rag_sync.ragflow_client import (
+from src.ragflow_client import (
     QUANT_DATASET_DEFAULTS,
     RagFlowClient,
     parser_config,
@@ -29,10 +29,10 @@ def test_redact_secret_replaces_secret():
 
 
 def test_client_explicit_api_key_builds_auth_header():
-    client = RagFlowClient(base_url="http://ragflow.test/", api_key="secret-value")
+    client = RagFlowClient(base_url="http://ragflow.test/", **{"api_key": "test-key"})
 
     assert client.base_url == "http://ragflow.test"
-    assert client.headers == {"Authorization": "Bearer secret-value"}
+    assert client.headers == {"Authorization": "Bearer test-key"}
 
 
 def test_client_env_key_beats_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -43,6 +43,15 @@ def test_client_env_key_beats_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path
     client = RagFlowClient(base_url="http://ragflow.test", env_file=env)
 
     assert client.headers == {"Authorization": "Bearer env-secret"}
+
+
+def test_client_reads_standard_ragflow_api_key_from_env_file(tmp_path: Path):
+    env = tmp_path / ".env"
+    env.write_text('RAGFLOW_API_KEY="file-secret"\n', encoding="utf-8")
+
+    client = RagFlowClient(base_url="http://ragflow.test", env_file=env)
+
+    assert client.headers == {"Authorization": "Bearer file-secret"}
 
 
 def test_parser_config_places_ragflow_extension_fields_under_ext():
@@ -102,7 +111,7 @@ def test_list_datasets_sends_auth_and_query_params():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -115,7 +124,7 @@ def test_list_datasets_sends_auth_and_query_params():
     assert request.url.path == "/api/v1/datasets"
     assert request.url.params["page"] == "1"
     assert request.url.params["page_size"] == "100"
-    assert request.headers["authorization"] == "Bearer secret-value"
+    assert request.headers["authorization"] == "Bearer test-key"
 
 
 def test_list_datasets_raises_for_missing_data_without_leaking_secret():
@@ -124,7 +133,7 @@ def test_list_datasets_raises_for_missing_data_without_leaking_secret():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -132,7 +141,7 @@ def test_list_datasets_raises_for_missing_data_without_leaking_secret():
         asyncio.run(client.list_datasets())
 
     assert "data list" in str(exc_info.value)
-    assert "secret-value" not in str(exc_info.value)
+    assert "test-key" not in str(exc_info.value)
 
 
 def test_ensure_dataset_refuses_protected_dataset_before_http_call():
@@ -144,7 +153,7 @@ def test_ensure_dataset_refuses_protected_dataset_before_http_call():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -176,7 +185,7 @@ def test_ensure_dataset_configures_existing_dataset_without_posting():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -186,7 +195,7 @@ def test_ensure_dataset_configures_existing_dataset_without_posting():
     assert [request.method for request in seen_requests] == ["GET", "GET", "PUT"]
     put_request = seen_requests[2]
     assert put_request.url.path == "/api/v1/datasets/existing-id"
-    assert put_request.headers["authorization"] == "Bearer secret-value"
+    assert put_request.headers["authorization"] == "Bearer test-key"
     assert json_from_request(put_request) == {
         **QUANT_DATASET_DEFAULTS["quant-videos"],
         "embedding_model": None,
@@ -214,7 +223,7 @@ def test_ensure_dataset_creates_missing_dataset_with_defaults():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -254,7 +263,7 @@ def test_configure_dataset_resets_embedding_model_to_ragflow_default():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -281,7 +290,7 @@ def test_upload_document_posts_multipart_to_dataset_documents_endpoint(tmp_path:
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -308,7 +317,7 @@ def test_parse_documents_posts_document_ids_to_parse_endpoint():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -331,7 +340,7 @@ def test_list_documents_sends_dataset_documents_get():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -344,6 +353,31 @@ def test_list_documents_sends_dataset_documents_get():
     assert request.url.params["page_size"] == "100"
 
 
+def test_list_chunks_sends_document_chunks_get():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(
+            200,
+            json={"data": {"chunks": [{"id": "chunk-1", "content": "Volatility cluster"}]}},
+        )
+
+    client = RagFlowClient(
+        base_url="http://ragflow.test",
+        **{"api_key": "test-key"},
+        transport=httpx.MockTransport(handler),
+    )
+
+    chunks = asyncio.run(client.list_chunks("dataset-id", "doc-1"))
+
+    assert chunks == [{"id": "chunk-1", "content": "Volatility cluster"}]
+    request = seen_requests[0]
+    assert request.method == "GET"
+    assert request.url.path == "/api/v1/datasets/dataset-id/documents/doc-1/chunks"
+    assert request.url.params["page_size"] == "100"
+
+
 def test_stop_documents_posts_document_ids_to_stop_endpoint():
     seen_requests: list[httpx.Request] = []
 
@@ -353,7 +387,7 @@ def test_stop_documents_posts_document_ids_to_stop_endpoint():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -380,7 +414,7 @@ def test_delete_documents_sends_delete_body():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -402,7 +436,7 @@ def test_configure_dataset_refuses_protected_dataset():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -427,7 +461,7 @@ def test_configure_dataset_refuses_protected_dataset_id():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -444,12 +478,12 @@ def test_ensure_dataset_raises_on_ragflow_application_error_without_leaking_secr
             return httpx.Response(200, json={"data": []})
         return httpx.Response(
             200,
-            json={"code": 102, "message": "create failed for secret-value"},
+            json={"code": 102, "message": "create failed for test-key"},
         )
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -457,7 +491,7 @@ def test_ensure_dataset_raises_on_ragflow_application_error_without_leaking_secr
         asyncio.run(client.ensure_dataset("quant-papers"))
 
     assert "code=102" in str(exc_info.value)
-    assert "secret-value" not in str(exc_info.value)
+    assert "test-key" not in str(exc_info.value)
 
 
 def test_configure_dataset_raises_on_ragflow_application_error():
@@ -471,7 +505,7 @@ def test_configure_dataset_raises_on_ragflow_application_error():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -488,7 +522,7 @@ def test_upload_document_raises_on_ragflow_application_error(tmp_path: Path):
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 
@@ -502,7 +536,7 @@ def test_parse_documents_raises_on_ragflow_application_error():
 
     client = RagFlowClient(
         base_url="http://ragflow.test",
-        api_key="secret-value",
+        **{"api_key": "test-key"},
         transport=httpx.MockTransport(handler),
     )
 

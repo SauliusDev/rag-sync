@@ -8,15 +8,15 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from rag_sync.config import DEFAULT_DATA_DIR, DEFAULT_PROFILE_PATH, load_profiles
-from rag_sync.db import RagSyncDb
-from rag_sync.glm_ocr import GLM_OCR_MODEL, glm_ocr_raw_dir
-from rag_sync.ldd import log_event
-from rag_sync.models import ParserMode, Profile, SourceState
-from rag_sync.parsers import GlmOcrParser, MarkerParser, MinerUParser, PassthroughParser
-from rag_sync.quality import check_markdown_quality
-from rag_sync.ragflow_client import RagFlowClient
-from rag_sync.scanner import scan_profile, sha256_file
+from src.config import DEFAULT_DATA_DIR, DEFAULT_PROFILE_PATH, load_profiles
+from src.db import RagSyncDb
+from src.glm_ocr import GLM_OCR_MODEL, glm_ocr_raw_dir
+from src.ldd import log_event
+from src.models import ParserMode, Profile, SourceState
+from src.parsers import GlmOcrParser, MarkerParser, MinerUParser, PassthroughParser
+from src.quality import check_markdown_quality
+from src.ragflow_client import RagFlowClient
+from src.scanner import scan_profile, sha256_file
 
 
 def _source_row(db: RagSyncDb, source_file_id: int) -> dict[str, Any]:

@@ -3,9 +3,9 @@ import json
 
 import pytest
 
-from rag_sync import ldd
-from rag_sync import parsers
-from rag_sync.parsers import MarkerParser, MinerUParser, PassthroughParser, build_marker_command
+from src import ldd
+from src import parsers
+from src.parsers import MarkerParser, MinerUParser, PassthroughParser, build_marker_command
 
 
 def _fake_completed_process(

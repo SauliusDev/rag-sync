@@ -1,8 +1,8 @@
 from pathlib import Path
 import subprocess
 
-from rag_sync.models import ParserMode, Profile, SkipRules
-from rag_sync.scanner import discover_files, pdf_metadata, scan_profile, sha256_file
+from src.models import ParserMode, Profile, SkipRules
+from src.scanner import discover_files, pdf_metadata, scan_profile, sha256_file
 
 
 def test_discover_files_skips_meta_folder(project_tmp: Path):
@@ -104,7 +104,7 @@ def test_pdf_metadata_extracts_page_count_and_producer(monkeypatch):
             stderr="",
         )
 
-    monkeypatch.setattr("rag_sync.scanner.subprocess.run", fake_run)
+    monkeypatch.setattr("src.scanner.subprocess.run", fake_run)
 
     metadata = pdf_metadata(Path("/tmp/example.pdf"))
 

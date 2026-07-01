@@ -16,9 +16,9 @@ from threading import Lock
 
 from pypdf import PdfReader
 
-from rag_sync.artifacts import make_upload_markdown, make_upload_markdown_from_text
-from rag_sync.glm_ocr import convert_pdf_with_glm_ocr
-from rag_sync.ldd import log_event
+from src.artifacts import make_upload_markdown, make_upload_markdown_from_text
+from src.glm_ocr import convert_pdf_with_glm_ocr
+from src.ldd import log_event
 
 MARKER_BIN = os.environ.get("RAG_SYNC_MARKER_BIN", "marker")
 MINERU_BIN = os.environ.get("RAG_SYNC_MINERU_BIN", "mineru")

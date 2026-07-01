@@ -105,7 +105,7 @@ describe('DatasetsPanel', () => {
 
     const markup = renderToStaticMarkup(createElement(App));
 
-    expect(markup.match(/<h1/g)?.length).toBe(4);
+    expect(markup.match(/<h1/g)?.length).toBe(5);
     expect(markup).toContain('<section class="screen-panel" aria-hidden="false"><div class="datasets-screen">');
     expect(markup).toContain('id="datasets-screen-title"');
     expect(markup).toContain('class="datasets-screen"');

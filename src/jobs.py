@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from rag_sync.models import JobKind
+from src.models import JobKind
 
 
 @dataclass

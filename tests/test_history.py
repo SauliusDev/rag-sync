@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from rag_sync.db import RagSyncDb
-from rag_sync.history import (
+from src.db import RagSyncDb
+from src.history import (
     apply_live_glm_ocr_progress,
     estimate_from_history,
     estimate_from_live_progress,
@@ -11,7 +11,7 @@ from rag_sync.history import (
     format_eta_seconds,
     size_band_for_bytes,
 )
-from rag_sync.models import SourceState
+from src.models import SourceState
 
 
 def test_estimate_from_live_progress_uses_elapsed_and_progress():

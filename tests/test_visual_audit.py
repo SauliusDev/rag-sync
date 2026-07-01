@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rag_sync.visual_audit import (
+from src.visual_audit import (
     append_significant_finding_to_mind,
     markdown_excerpt_for_page,
     prepare_manifest_visual_audit,
@@ -165,14 +165,14 @@ def test_prepare_manifest_visual_audit_writes_bundle(
         def __init__(self, _path: str):
             self.pages = [object(), object(), object(), object(), object()]
 
-    monkeypatch.setattr("rag_sync.visual_audit.PdfReader", FakeReader)
+    monkeypatch.setattr("src.visual_audit.PdfReader", FakeReader)
 
     def fake_render(pdf_path: Path, *, page_number: int, output_path: Path, dpi: int = 170) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"png")
         return output_path
 
-    monkeypatch.setattr("rag_sync.visual_audit.render_pdf_page", fake_render)
+    monkeypatch.setattr("src.visual_audit.render_pdf_page", fake_render)
 
     prepared = prepare_manifest_visual_audit(
         manifest_path=manifest,
@@ -194,7 +194,7 @@ def test_write_prepared_manifest_summary_lists_books(project_tmp: Path) -> None:
     source.write_bytes(b"%PDF")
     markdown = project_tmp / "Book.md"
     markdown.write_text("body", encoding="utf-8")
-    from rag_sync.visual_audit import PreparedBookAudit, PreparedPageSample
+    from src.visual_audit import PreparedBookAudit, PreparedPageSample
 
     bundle = PreparedBookAudit(
         source_pdf=source,

@@ -2,10 +2,10 @@ import asyncio
 import json
 from pathlib import Path
 
-from rag_sync import ldd
-from rag_sync.db import RagSyncDb
-from rag_sync.models import JobKind, SourceState
-from rag_sync.queue import PersistentJobQueue
+from src import ldd
+from src.db import RagSyncDb
+from src.models import JobKind, SourceState
+from src.queue import PersistentJobQueue
 
 
 def _add_source(db: RagSyncDb, project_tmp: Path) -> int:

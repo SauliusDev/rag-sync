@@ -19,7 +19,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from rich.table import Table
 from rich.text import Text
 
-from rag_sync.marker_batch import BatchRunResult, run_batch
+from src.marker_batch import BatchRunResult, run_batch
 
 CLI_RUNTIME_ERROR_EXIT_CODE = 2
 POLL_INTERVAL_SECONDS = 0.5

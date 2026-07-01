@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from rag_sync.cli import app
-from rag_sync.db import RagSyncDb
+from src.cli import app
+from src.db import RagSyncDb
 
 
 def test_cli_help_exits_successfully() -> None:
@@ -61,7 +61,7 @@ def test_scan_persists_files_for_selected_profile(
     _write_config(config, Path("articles"))
     db = RagSyncDb(tmp_path / "state.sqlite")
     db.migrate()
-    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
+    monkeypatch.setattr("src.cli.default_db", lambda: db)
 
     result = CliRunner().invoke(
         app,
@@ -120,9 +120,9 @@ def test_convert_command_prints_output_path(monkeypatch: pytest.MonkeyPatch, tmp
     config = tmp_path / "profiles.toml"
     output_path = tmp_path / "output.md"
     calls: list[tuple[object, int, str | None, Path]] = []
-    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
+    monkeypatch.setattr("src.cli.default_db", lambda: db)
     monkeypatch.setattr(
-        "rag_sync.cli.convert_source_file",
+        "src.cli.convert_source_file",
         lambda actual_db, source_file_id, parser, profile_path: calls.append(
             (actual_db, source_file_id, parser, profile_path)
         )
@@ -149,8 +149,8 @@ def test_upload_command_prints_document_id(monkeypatch: pytest.MonkeyPatch, tmp_
         calls.append((actual_db, source_file_id, profile_path))
         return {"document_id": "document-123"}
 
-    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
-    monkeypatch.setattr("rag_sync.cli.upload_latest_artifact", fake_upload)
+    monkeypatch.setattr("src.cli.default_db", lambda: db)
+    monkeypatch.setattr("src.cli.upload_latest_artifact", fake_upload)
 
     result = CliRunner().invoke(app, ["upload", "42", "--config", str(config)])
 
@@ -167,8 +167,8 @@ def test_parse_command_prints_parsed_message(monkeypatch: pytest.MonkeyPatch):
         calls.append((actual_db, source_file_id))
         return {"code": 0}
 
-    monkeypatch.setattr("rag_sync.cli.default_db", lambda: db)
-    monkeypatch.setattr("rag_sync.cli.parse_uploaded_document", fake_parse)
+    monkeypatch.setattr("src.cli.default_db", lambda: db)
+    monkeypatch.setattr("src.cli.parse_uploaded_document", fake_parse)
 
     result = CliRunner().invoke(app, ["parse", "42"])
 
@@ -194,7 +194,7 @@ def test_marker_batch_run_command_invokes_runner(
         log_path = output_dir / "logs" / "run.jsonl"
 
     monkeypatch.setattr(
-        "rag_sync.cli.run_marker_batch",
+        "src.cli.run_marker_batch",
         lambda **kwargs: calls.append(kwargs) or Result(),
     )
 
@@ -241,7 +241,7 @@ def test_marker_batch_run_command_exits_for_invalid_input_dir(
     output_dir = tmp_path / "batch"
 
     monkeypatch.setattr(
-        "rag_sync.cli.run_marker_batch",
+        "src.cli.run_marker_batch",
         lambda **kwargs: (_ for _ in ()).throw(ValueError("input directory does not exist")),
     )
 

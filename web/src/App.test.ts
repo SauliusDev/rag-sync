@@ -9,6 +9,7 @@ import {
   fetchJobs,
   fetchProfiles,
   fetchSettings,
+  fetchSpace,
   fetchStatus,
   killQueue,
   loadJson,
@@ -47,6 +48,40 @@ describe('fetchProfiles', () => {
           source_paths: ['/atlas/articles'],
         },
       ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('fetchSpace', () => {
+  it('returns projected chunk space from the API response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          datasets: [{ id: 'dataset-1', name: 'quant-articles' }],
+          documents: [{ id: 'doc-1', dataset_id: 'dataset-1', name: 'volatility.md' }],
+          chunks: [
+            {
+              id: 'chunk-1',
+              dataset_id: 'dataset-1',
+              document_id: 'doc-1',
+              text: 'Volatility smiles',
+              position: { x: 0.1, y: 0.2, z: 0.3 },
+            },
+          ],
+          errors: [],
+          cache: { hit: true, fingerprint: 'abc' },
+        }),
+        { status: 200 },
+      );
+
+    try {
+      await expect(fetchSpace()).resolves.toMatchObject({
+        chunks: [{ id: 'chunk-1', position: { x: 0.1, y: 0.2, z: 0.3 } }],
+        cache: { hit: true },
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

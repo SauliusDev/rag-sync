@@ -1,6 +1,6 @@
 import pytest
 
-from rag_sync.retrieval import FORMULA_BENCHMARK_QUERIES, query_set
+from src.retrieval import FORMULA_BENCHMARK_QUERIES, query_set
 
 
 def test_formula_benchmark_query_set_contract():

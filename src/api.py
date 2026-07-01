@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
 import subprocess
 import time
@@ -15,23 +17,23 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from rag_sync.config import DEFAULT_PROFILE_PATH, DEFAULT_RAGFLOW_BASE_URL, load_profiles
-from rag_sync.db import RagSyncDb
-from rag_sync.import_manifest import import_manifest_batch, preview_manifest_batch
-from rag_sync.ldd import log_event
-from rag_sync.history import (
+from src.config import DEFAULT_PROFILE_PATH, DEFAULT_RAGFLOW_BASE_URL, load_profiles
+from src.db import RagSyncDb
+from src.import_manifest import import_manifest_batch, preview_manifest_batch
+from src.ldd import log_event
+from src.history import (
     apply_live_glm_ocr_progress,
     estimate_job_timing,
     estimate_queue_timing,
     format_eta_seconds,
     prepare_timing_context,
 )
-from rag_sync.models import JobKind, Profile
-from rag_sync.parsers import terminate_active_parser_processes
-from rag_sync.queue import JobCanceledError, PersistentJobQueue
-from rag_sync.ragflow_client import PROTECTED_DATASETS, QUANT_DATASET_DEFAULTS, RagFlowClient
-from rag_sync.scanner import backfill_pdf_metadata
-from rag_sync.sync import (
+from src.models import JobKind, Profile
+from src.parsers import terminate_active_parser_processes
+from src.queue import JobCanceledError, PersistentJobQueue
+from src.ragflow_client import PROTECTED_DATASETS, QUANT_DATASET_DEFAULTS, RagFlowClient
+from src.scanner import backfill_pdf_metadata
+from src.sync import (
     convert_source_file,
     default_db,
     delete_ragflow_document,
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 OPENROUTER_USAGE_CACHE_TTL_SECONDS = 60
 _openrouter_usage_cache: tuple[float, dict[str, object]] | None = None
+SPACE_CACHE_KEY = "ragflow-space-v3"
 
 
 class ConvertRequest(BaseModel):
@@ -83,6 +86,186 @@ class ImportBatchRequest(BaseModel):
     force: bool = False
     reason: str = ""
     selected_relpaths: list[str] | None = None
+
+
+def _chunk_text(chunk: dict[str, object]) -> str:
+    for key in ("content", "text", "chunk_text", "important_kwd", "question"):
+        value = chunk.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return json.dumps(chunk, sort_keys=True)
+
+
+def _chunk_keywords(chunk: dict[str, object]) -> list[str]:
+    keywords: list[str] = []
+    for key in ("important_keywords", "important_kwd", "question_kwd"):
+        value = chunk.get(key)
+        if isinstance(value, list):
+            keywords.extend(str(item).strip() for item in value if str(item).strip())
+        elif isinstance(value, str):
+            keywords.extend(item.strip() for item in value.split(",") if item.strip())
+    return list(dict.fromkeys(keywords))
+
+
+def _content_preview(text: str) -> str:
+    compact = " ".join(text.split())
+    return compact[:240]
+
+
+def _space_fingerprint(documents: list[dict[str, object]]) -> str:
+    seed = json.dumps(
+        [
+            {
+                "dataset_id": doc.get("dataset_id"),
+                "document_id": doc.get("document_id"),
+                "chunk_count": doc.get("chunk_count"),
+                "token_count": doc.get("token_count"),
+                "last_synced_at": doc.get("last_synced_at"),
+            }
+            for doc in documents
+        ],
+        sort_keys=True,
+    )
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _project_chunk(text: str, index: int, total: int) -> dict[str, float]:
+    digest = hashlib.sha256(f"{index}:{text}".encode("utf-8")).digest()
+    angle = int.from_bytes(digest[:4], "big") / 2**32 * math.tau
+    height = (int.from_bytes(digest[4:8], "big") / 2**32 - 0.5) * 1.8
+    radius_noise = int.from_bytes(digest[8:12], "big") / 2**32
+    cluster = int.from_bytes(digest[12:14], "big") % 9
+    cluster_angle = cluster / 9 * math.tau
+    cluster_radius = 0.35 + (cluster % 3) * 0.18
+    global_radius = 0.25 + radius_noise * 0.75
+    spread = 0.35 if total > 200 else 0.55
+    x = math.cos(cluster_angle) * cluster_radius + math.cos(angle) * global_radius * spread
+    y = math.sin(angle * 0.7) * height
+    z = math.sin(cluster_angle) * cluster_radius + math.sin(angle) * global_radius * spread
+    return {"x": round(x, 6), "y": round(y, 6), "z": round(z, 6)}
+
+
+async def build_space_payload(db: RagSyncDb) -> dict[str, object]:
+    files = db.list_file_summaries()
+    ragflow_docs = [
+        {
+            **dict(row["ragflow"]),
+            "source_path": str(row.get("source_path") or ""),
+        }
+        for row in files
+        if isinstance(row.get("ragflow"), dict) and row["ragflow"].get("document_id")
+    ]
+    fingerprint = _space_fingerprint(ragflow_docs)
+    cached = db.get_space_cache(SPACE_CACHE_KEY, fingerprint)
+    if cached is not None:
+        cached["cache"] = {"hit": True, "fingerprint": fingerprint}
+        return cached
+
+    datasets: dict[str, dict[str, object]] = {}
+    documents: list[dict[str, object]] = []
+    chunks: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
+    total_expected = sum(int(doc.get("chunk_count") or 0) for doc in ragflow_docs) or len(ragflow_docs)
+
+    try:
+        client = RagFlowClient()
+    except Exception as exc:
+        errors.append(
+            {
+                "document_id": "",
+                "document_name": "",
+                "message": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        stale = db.get_latest_space_cache(SPACE_CACHE_KEY)
+        if stale is not None and stale.get("chunks"):
+            stale["errors"] = errors
+            stale["cache"] = {"hit": True, "stale": True, "fingerprint": fingerprint}
+            return stale
+        return {
+            "summary": {
+                "datasets": 0,
+                "documents": len(ragflow_docs),
+                "chunks": 0,
+            },
+            "datasets": [],
+            "documents": [],
+            "chunks": [],
+            "errors": errors,
+            "cache": {"hit": False, "fingerprint": fingerprint},
+        }
+
+    for doc in ragflow_docs:
+        dataset_id = str(doc.get("dataset_id") or "")
+        dataset_name = str(doc.get("dataset_name") or dataset_id)
+        document_id = str(doc.get("document_id") or "")
+        document_name = str(doc.get("document_name") or document_id)
+        source_path = str(doc.get("source_path") or "")
+        datasets[dataset_id] = {
+            "id": dataset_id,
+            "name": dataset_name,
+            "chunk_count": int(doc.get("chunk_count") or 0),
+        }
+        documents.append(
+            {
+                "id": document_id,
+                "dataset_id": dataset_id,
+                "dataset_name": dataset_name,
+                "name": document_name,
+                "source_path": source_path,
+                "chunk_count": int(doc.get("chunk_count") or 0),
+            }
+        )
+        try:
+            remote_chunks = await client.list_chunks(dataset_id, document_id)
+        except Exception as exc:
+            errors.append(
+                {
+                    "document_id": document_id,
+                    "document_name": document_name,
+                    "message": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        for remote_chunk in remote_chunks:
+            text = _chunk_text(remote_chunk)
+            chunk_index = len(chunks)
+            chunk_id = str(remote_chunk.get("id") or remote_chunk.get("chunk_id") or f"{document_id}:{chunk_index}")
+            chunks.append(
+                {
+                    "id": chunk_id,
+                    "dataset_id": dataset_id,
+                    "dataset_name": dataset_name,
+                    "document_id": document_id,
+                    "document_name": document_name,
+                    "source_path": source_path,
+                    "content_preview": _content_preview(text),
+                    "keywords": _chunk_keywords(remote_chunk),
+                    "position": _project_chunk(text, chunk_index, total_expected),
+                }
+            )
+
+    payload: dict[str, object] = {
+        "summary": {
+            "datasets": len(datasets),
+            "documents": len(documents),
+            "chunks": len(chunks),
+        },
+        "datasets": list(datasets.values()),
+        "documents": documents,
+        "chunks": chunks,
+        "errors": errors,
+        "cache": {"hit": False, "fingerprint": fingerprint},
+    }
+    if chunks:
+        db.set_space_cache(SPACE_CACHE_KEY, fingerprint, payload)
+    else:
+        stale = db.get_latest_space_cache(SPACE_CACHE_KEY)
+        if stale is not None and stale.get("chunks"):
+            stale["errors"] = errors
+            stale["cache"] = {"hit": True, "stale": True, "fingerprint": fingerprint}
+            return stale
+    return payload
 
 
 def format_file_name(source_path: str) -> str:
@@ -1228,6 +1411,10 @@ def create_app(
             )
         return {"datasets": datasets_payload, "remote_error": remote_error}
 
+    @app.get("/api/space")
+    def space() -> dict[str, object]:
+        return asyncio.run(build_space_payload(db))
+
     @app.post("/api/scan/{profile_name}")
     def scan(profile_name: str) -> dict[str, int]:
         profiles_by_name = {
@@ -1539,7 +1726,7 @@ def create_app(
 
     @app.get("/api/retrieval/query-sets/{name}")
     def retrieval_query_set(name: str) -> dict[str, object]:
-        from rag_sync.retrieval import query_set
+        from src.retrieval import query_set
 
         try:
             queries = query_set(name)

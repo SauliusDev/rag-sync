@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from rag_sync.config import DEFAULT_PROFILE_PATH, load_profiles
-from rag_sync.models import ParserMode
+from src.config import DEFAULT_PROFILE_PATH, load_profiles
+from src.models import ParserMode
 
 
 def write_config(tmp_path: Path, content: str) -> Path:

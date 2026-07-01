@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from rag_sync.models import ImportValidationStatus, SourceState
+from src.models import ImportValidationStatus, SourceState
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_files (
@@ -158,6 +158,13 @@ CREATE TABLE IF NOT EXISTS batch_import_files (
   FOREIGN KEY(batch_import_id) REFERENCES batch_imports(id),
   FOREIGN KEY(source_file_id) REFERENCES source_files(id)
 );
+
+CREATE TABLE IF NOT EXISTS space_cache (
+  cache_key TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -251,6 +258,57 @@ class RagSyncDb:
                     )
                     """
                 )
+            if "space_cache" not in tables:
+                conn.execute(
+                    """
+                    CREATE TABLE space_cache (
+                      cache_key TEXT PRIMARY KEY,
+                      fingerprint TEXT NOT NULL,
+                      payload_json TEXT NOT NULL,
+                      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+
+    def get_space_cache(self, cache_key: str, fingerprint: str) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM space_cache
+                WHERE cache_key = ? AND fingerprint = ?
+                """,
+                (cache_key, fingerprint),
+            ).fetchone()
+            return json.loads(str(row["payload_json"])) if row is not None else None
+
+    def get_latest_space_cache(self, cache_key: str) -> dict[str, Any] | None:
+        with self.session() as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM space_cache
+                WHERE cache_key = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (cache_key,),
+            ).fetchone()
+            return json.loads(str(row["payload_json"])) if row is not None else None
+
+    def set_space_cache(self, cache_key: str, fingerprint: str, payload: dict[str, Any]) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO space_cache (cache_key, fingerprint, payload_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                  fingerprint = excluded.fingerprint,
+                  payload_json = excluded.payload_json,
+                  created_at = CURRENT_TIMESTAMP
+                """,
+                (cache_key, fingerprint, json.dumps(payload, sort_keys=True)),
+            )
 
     def upsert_source_file(
         self,

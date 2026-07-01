@@ -13,10 +13,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rag_sync import __version__
-from rag_sync.ldd import log_event_to_path
-from rag_sync.parsers import build_marker_command, _should_disable_marker_ocr_for_pdf
-from rag_sync.scanner import pdf_metadata, sha256_file
+from src import __version__
+from src.ldd import log_event_to_path
+from src.parsers import build_marker_command, _should_disable_marker_ocr_for_pdf
+from src.scanner import pdf_metadata, sha256_file
 
 MARKER_BATCH_TIMEOUT_SECONDS = int(os.environ.get("RAG_SYNC_MARKER_TIMEOUT_SECONDS", "0"))
 

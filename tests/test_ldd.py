@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from rag_sync import ldd
+from src import ldd
 
 
 def test_log_event_appends_structured_jsonl(project_tmp: Path):

@@ -9,7 +9,7 @@ import re
 from statistics import median
 from typing import Any
 
-from rag_sync.config import DEFAULT_DATA_DIR
+from src.config import DEFAULT_DATA_DIR
 
 MB = 1_000_000
 

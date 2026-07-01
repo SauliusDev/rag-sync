@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from rag_sync.config import DEFAULT_DATA_DIR
+from src.config import DEFAULT_DATA_DIR
 
 _log_path_for_tests: Path | None = None
 _log_lock = Lock()

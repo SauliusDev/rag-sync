@@ -34,7 +34,7 @@ if curl -fsS "$API_URL" >/dev/null 2>&1; then
   log "api.reuse" "ok" "url=$API_URL"
 else
   log "api.start" "ok" "host=0.0.0.0 port=8091 log=$API_LOG"
-  uv run uvicorn rag_sync.api:app --host 0.0.0.0 --port 8091 >>"$API_LOG" 2>&1 &
+  uv run uvicorn src.api:app --host 0.0.0.0 --port 8091 >>"$API_LOG" 2>&1 &
   API_PID="$!"
 
   api_ready="false"

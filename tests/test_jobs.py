@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from rag_sync.jobs import LocalJobQueue
-from rag_sync.models import JobKind
+from src.jobs import LocalJobQueue
+from src.models import JobKind
 
 
 def test_job_queue_runs_job():

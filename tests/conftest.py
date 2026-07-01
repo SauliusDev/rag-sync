@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from rag_sync import ldd
+from src import ldd
 
 
 @pytest.fixture

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from rag_sync.import_manifest import load_manifest
-from rag_sync.marker_batch import run_batch, run_marker_for_file
+from src.import_manifest import load_manifest
+from src.marker_batch import run_batch, run_marker_for_file
 
 
 def test_marker_batch_writes_manifest_and_logs(
@@ -27,7 +27,7 @@ def test_marker_batch_writes_manifest_and_logs(
             "duration_seconds": 1.25,
         }
 
-    monkeypatch.setattr("rag_sync.marker_batch.run_marker_for_file", fake_run_marker)
+    monkeypatch.setattr("src.marker_batch.run_marker_for_file", fake_run_marker)
 
     result = run_batch(
         input_dir=input_dir,
@@ -60,7 +60,7 @@ def test_marker_batch_failed_conversion_manifest_loads_with_task1_loader(
             "stderr": "boom",
         }
 
-    monkeypatch.setattr("rag_sync.marker_batch.run_marker_for_file", fake_run_marker)
+    monkeypatch.setattr("src.marker_batch.run_marker_for_file", fake_run_marker)
 
     run_batch(
         input_dir=input_dir,
@@ -100,7 +100,7 @@ def test_marker_batch_discovers_nested_pdfs_and_preserves_relative_paths(
             "duration_seconds": 0.5,
         }
 
-    monkeypatch.setattr("rag_sync.marker_batch.run_marker_for_file", fake_run_marker)
+    monkeypatch.setattr("src.marker_batch.run_marker_for_file", fake_run_marker)
 
     run_batch(
         input_dir=input_dir,
@@ -136,7 +136,7 @@ def test_marker_batch_discovers_uppercase_pdf_extension(
             "duration_seconds": 0.5,
         }
 
-    monkeypatch.setattr("rag_sync.marker_batch.run_marker_for_file", fake_run_marker)
+    monkeypatch.setattr("src.marker_batch.run_marker_for_file", fake_run_marker)
 
     run_batch(
         input_dir=input_dir,
@@ -177,7 +177,7 @@ def test_marker_batch_duplicate_basenames_do_not_collide(
             "duration_seconds": 0.5,
         }
 
-    monkeypatch.setattr("rag_sync.marker_batch.run_marker_for_file", fake_run_marker)
+    monkeypatch.setattr("src.marker_batch.run_marker_for_file", fake_run_marker)
 
     run_batch(
         input_dir=input_dir,
@@ -224,7 +224,7 @@ def test_run_marker_for_file_enforces_timeout_and_cleans_up_process(
     killed: list[tuple[int, int]] = []
 
     monkeypatch.setattr(
-        "rag_sync.marker_batch.pdf_metadata",
+        "src.marker_batch.pdf_metadata",
         lambda path: {"pdf_producer": "Test Producer", "page_count": 1},
     )
 
@@ -236,11 +236,11 @@ def test_run_marker_for_file_enforces_timeout_and_cleans_up_process(
             raise subprocess.TimeoutExpired(cmd=["marker"], timeout=timeout)
 
     monkeypatch.setattr(
-        "rag_sync.marker_batch.subprocess.Popen",
+        "src.marker_batch.subprocess.Popen",
         lambda *args, **kwargs: FakeProc(),
     )
     monkeypatch.setattr(
-        "rag_sync.marker_batch.os.killpg",
+        "src.marker_batch.os.killpg",
         lambda pid, sig: killed.append((pid, sig)),
     )
 

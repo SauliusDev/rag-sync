@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from rag_sync import glm_ocr
+from src import glm_ocr
 
 
 def test_extract_markdown_prefers_content_markdown() -> None:

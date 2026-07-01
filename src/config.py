@@ -5,9 +5,9 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from rag_sync.models import ParserMode, Profile, SkipRules
+from src.models import ParserMode, Profile, SkipRules
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROFILE_PATH = Path(
     os.environ.get("RAG_SYNC_PROFILE_PATH", REPO_ROOT / "config" / "profiles.toml")
 )

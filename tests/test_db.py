@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from rag_sync.db import RagSyncDb
-from rag_sync.models import SourceState
+from src.db import RagSyncDb
+from src.models import SourceState
 
 
 def test_db_upserts_source_file(project_tmp: Path):
